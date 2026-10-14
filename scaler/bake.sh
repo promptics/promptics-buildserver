@@ -62,6 +62,8 @@ for i in 1 2 3 4; do
   # other). The runner applies .env to every job; config.sh at boot adds its own lines to this file.
   install -d -o runner -g runner "/home/runner/slot-$i"
   grep -q '^HOME=' "$d/.env" 2>/dev/null || echo "HOME=/home/runner/slot-$i" >> "$d/.env"
+  # Gradle takes its user home from the JVM's user.home (the passwd entry), not from HOME.
+  grep -q '^GRADLE_USER_HOME=' "$d/.env" || echo "GRADLE_USER_HOME=/home/runner/slot-$i/.gradle" >> "$d/.env"
   chown runner:runner "$d/.env"
 done
 # A bake that misses a tool fails here, before a snapshot is taken, not in someone's job later.
@@ -72,6 +74,7 @@ docker compose version >/dev/null && docker buildx version >/dev/null
 mvn -v | grep -q "Apache Maven 3.9" || { echo "bake: mvn is not 3.9" >&2; exit 1; }
 for i in 1 2 3 4; do
   grep -qx "HOME=/home/runner/slot-$i" "/opt/actions-runner-$i/.env" || { echo "bake: slot $i has no own HOME" >&2; exit 1; }
+  grep -qx "GRADLE_USER_HOME=/home/runner/slot-$i/.gradle" "/opt/actions-runner-$i/.env" || { echo "bake: slot $i has no own GRADLE_USER_HOME" >&2; exit 1; }
 done
 locale -a | grep -qi '^en_US.utf8$' || { echo "bake: en_US.UTF-8 locale missing" >&2; exit 1; }
 if [ "$(npm config get prefix)" != /usr/local ] || ! sudo -u runner test -w /usr/local/lib/node_modules; then
