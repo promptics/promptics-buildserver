@@ -61,5 +61,13 @@ class Remove(unittest.TestCase):
         self.assertTrue(pool.should_remove(T0, at(52), busy=False, queued=1, runners_online=0))
 
 
+class StrayBake(unittest.TestCase):
+    def test_a_bake_within_its_workflow_timeout_is_left_alone(self):
+        self.assertFalse(pool.stray_bake(T0, at(40)))
+
+    def test_a_bake_server_older_than_any_bake_workflow_goes(self):
+        self.assertTrue(pool.stray_bake(T0, at(46)))
+
+
 if __name__ == "__main__":
     unittest.main()
