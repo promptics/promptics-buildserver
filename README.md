@@ -20,7 +20,7 @@ jobs:
 | `scaler/bake.sh` | The server toolchain, baked into a snapshot so a server boots in about a minute |
 | `scaler/runner-boot.sh` | First boot: registers the runners and arms the reaper |
 | `scaler/reaper.sh` | On the server, every minute: deletes the server when idle at the end of its billing hour |
-| `webhook/` | A Cloudflare Worker that receives the organisation's `workflow_job` webhook and starts the scaler at once |
+| `webhook/` | A Cloudflare Worker that receives the organisation's webhook: starts the scaler at once for a queued pool job, and optionally wakes a configured controller workflow when an issue becomes ready or a pull request is merged |
 | `.github/workflows/pool-scale.yml` | Runs the controller (from the webhook; the schedule is a backstop) |
 | `.github/workflows/pool-bake.yml` | Bakes the snapshot weekly |
 | `docs/design.md` | The lease rule and why it looks like this |
