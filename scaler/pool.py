@@ -27,7 +27,8 @@ creation instant, running or powered off; only deletion stops the meter. So:
 
 The server removes itself (reaper.sh, every minute, on the server): GitHub's scheduled
 workflows start minutes late and would miss the window. This controller runs every few
-minutes, creates what demand needs, and sweeps what a dead reaper left behind.
+minutes, creates what demand needs, and sweeps what a dead reaper left behind. It also deletes
+a bake server whose bake workflow died before deleting it: such a server would bill forever.
 """
 import datetime as dt
 import json
@@ -42,6 +43,7 @@ HC = "https://api.hetzner.cloud/v1"
 GH = "https://api.github.com"
 REMOVE_FROM, REMOVE_UNTIL = 50, 58          # minutes into the billing hour
 BOOT_GRACE_MIN = 15                         # a server younger than this may still be booting
+BAKE_MAX_MIN = 45                           # pool-bake.yml times out at 40; an older bake server lost its workflow
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -74,6 +76,11 @@ def should_remove(created: dt.datetime, now: dt.datetime, busy: bool, queued: in
     age_min = (now - created).total_seconds() / 60
     broken = runners_online == 0 and age_min > BOOT_GRACE_MIN
     return queued == 0 or broken
+
+
+def stray_bake(created: dt.datetime, now: dt.datetime) -> bool:
+    """A bake server outlives its workflow only when that workflow died before its cleanup step."""
+    return (now - created).total_seconds() / 60 > BAKE_MAX_MIN
 
 
 # ---------------------------------------------------------------- the two APIs
@@ -118,6 +125,10 @@ class Pool:
 
     def servers(self):
         sel = urllib.parse.quote(f"pool={self.pool}")
+        return self.hc(f"/servers?label_selector={sel}&per_page=50")["servers"]
+
+    def bake_servers(self):
+        sel = urllib.parse.quote(f"pool-bake={self.pool}")
         return self.hc(f"/servers?label_selector={sel}&per_page=50")["servers"]
 
     def image(self):
@@ -254,6 +265,13 @@ class Pool:
             online = sum(1 for r in mine if r["status"] == "online")
             if should_remove(created(s), now, busy, queued, online):
                 self.remove(s, mine)
+
+        # bake servers whose workflow died before deleting them
+        for b in self.bake_servers():
+            if stray_bake(created(b), now):
+                print(f"delete stray bake server {b['name']} ({b['status']}, created {b['created']})")
+                if not self.dry:
+                    self.hc(f"/servers/{b['id']}", "DELETE")
 
         # runners whose server is gone stay listed as offline; drop them
         for r in runners:
