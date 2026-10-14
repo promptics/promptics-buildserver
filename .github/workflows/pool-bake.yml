@@ -1,0 +1,59 @@
+# Bakes each pool's snapshot: a server installs the toolchain (scaler/bake.sh), powers itself
+# off, is snapshotted with the label pool-image=<pool>, and is deleted. Scaled servers then boot
+# from the snapshot in about a minute. Weekly for OS and toolchain updates; keeps two snapshots.
+name: pool bake
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pool: promptics-pool
+            candidates: "cx43:fsn1 cx43:nbg1 cx43:hel1 cpx42:fsn1 cpx42:nbg1 cpx42:hel1"
+            token: HCLOUD_TOKEN_CI
+    env:
+      HCLOUD_TOKEN: ${{ secrets[matrix.token] }}
+      POOL: ${{ matrix.pool }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install hcloud
+        run: curl -fsSL https://github.com/hetznercloud/cli/releases/latest/download/hcloud-linux-amd64.tar.gz | sudo tar -xz -C /usr/local/bin hcloud
+      - name: Boot a bake server
+        run: |
+          name="bake-${POOL}-$(date -u +%Y%m%d%H%M%S)"
+          { echo '#!/bin/bash'; echo 'set -euo pipefail'; cat scaler/bake.sh; echo 'cloud-init clean --logs'; echo 'poweroff'; } > /tmp/bake-user-data
+          # Hetzner often has no capacity for one type in one location: walk the candidates.
+          for c in ${{ matrix.candidates }}; do
+            if hcloud server create --name "$name" --type "${c%%:*}" --location "${c##*:}" \
+                 --image ubuntu-24.04 --user-data-from-file /tmp/bake-user-data --label "pool-bake=${POOL}"; then
+              echo "BAKE_SERVER=$name" >> "$GITHUB_ENV"; exit 0
+            fi
+            echo "${c}: not placed, trying the next candidate"
+          done
+          echo "::error::no candidate could place the bake server"; exit 1
+      - name: Wait until it has powered itself off
+        run: |
+          for i in $(seq 1 120); do
+            [ "$(hcloud server describe "$BAKE_SERVER" -o json | jq -r .status)" = off ] && exit 0
+            sleep 15
+          done
+          echo "::error::bake server never powered off"; exit 1
+      - name: Snapshot, label, prune
+        run: |
+          hcloud server create-image --type snapshot --description "${POOL} $(date -u +%F)" --label "pool-image=${POOL}" "$BAKE_SERVER"
+          hcloud image list -t snapshot -l "pool-image=${POOL}" -o json | jq -r 'sort_by(.created) | reverse | .[2:][] | .id' \
+            | xargs -r -n1 hcloud image delete
+      - name: Delete the bake server
+        if: always()
+        run: '[ -z "${BAKE_SERVER:-}" ] || hcloud server delete "$BAKE_SERVER"'

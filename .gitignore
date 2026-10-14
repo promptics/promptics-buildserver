@@ -1,0 +1,3 @@
+__pycache__/
+webhook/.wrangler/
+webhook/node_modules/
