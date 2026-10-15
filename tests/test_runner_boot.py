@@ -16,6 +16,17 @@ STUBS = {
         case "$*" in *apt-daily*) [ -e "$STATE/apt-units-fail" ] && exit 1 ;; esac
         exit 0
     """,
+    "apt-get": """
+        echo "apt-get $*" >> "$STATE/calls"
+        [ -e "$STATE/apt-get-fail" ] && exit 100
+        exit 0
+    """,
+    # The real timeout kills its command after N seconds; here N is only logged.
+    "timeout": """
+        echo "timeout $1" >> "$STATE/calls"
+        shift
+        exec "$@"
+    """,
     # sudo -u runner bash -c CMD
     "sudo": 'shift 2; exec "$@"',
 }
@@ -86,6 +97,29 @@ class RunnerBoot(unittest.TestCase):
         self.assertIn("svc.sh slot 2 start", calls)
         self.assertIn("systemctl enable --now pool-reaper.timer", calls)
         self.assertIn("cannot disable the apt timers", result.stderr)
+
+    def test_security_upgrade_runs_bounded_and_before_the_first_runner_registers(self):
+        result = self.boot()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        disable = calls.index("systemctl disable --now apt-daily.timer apt-daily-upgrade.timer")
+        update = calls.index("apt-get update -q")
+        upgrade = calls.index("apt-get -yq -o Dpkg::Options::=--force-confold upgrade")
+        self.assertLess(disable, update)
+        self.assertLess(update, upgrade)
+        self.assertLess(upgrade, calls.index("config.sh slot 1"))
+        self.assertIn("timeout 600", calls)
+
+    def test_a_failed_security_upgrade_still_registers_the_runners(self):
+        self.write_flag("apt-get-fail")
+        result = self.boot()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        self.assertNotIn("apt-get -yq -o Dpkg::Options::=--force-confold upgrade", calls)
+        self.assertIn("svc.sh slot 1 start", calls)
+        self.assertIn("svc.sh slot 2 start", calls)
+        self.assertIn("systemctl enable --now pool-reaper.timer", calls)
+        self.assertIn("boot-time security upgrade failed", result.stderr)
 
     def test_the_reaper_timer_is_armed(self):
         self.boot()

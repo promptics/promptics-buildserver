@@ -6,8 +6,7 @@
 # billing hour.
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-# Pool servers never upgrade themselves (runner-boot.sh turns unattended-upgrades off), so the
-# security updates reach them through this weekly snapshot.
+# runner-boot.sh upgrades once at every server boot, so this keeps that upgrade small.
 apt-get upgrade -yq -o Dpkg::Options::=--force-confold
 apt-get install -yq openjdk-17-jdk-headless openjdk-21-jdk-headless git curl wget jq unzip tar gzip make ca-certificates shellcheck \
   python3 python3-pip python3-venv pipx build-essential default-mysql-client sshpass xvfb zip rsync openssh-client gnupg locales zlib1g-dev

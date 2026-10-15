@@ -9,13 +9,22 @@ RUNNER_ROOT=${POOL_RUNNER_ROOT:-/opt}
 # on the run the snapshot missed after a random delay of up to an hour, installs each security
 # update in its own dpkg call, and needrestart then restarts every service whose process maps an
 # old library, the runners and docker among them. So the apt timers are off before the first
-# runner registers, an upgrade already under way is stopped (unattended-upgrades finishes the
-# package it is on), and needrestart only lists what it would restart. Updates reach the pool
-# through the weekly bake instead (scaler/bake.sh).
+# runner registers and an upgrade already under way is stopped (unattended-upgrades finishes the
+# package it is on). Security updates still reach the server: they are installed here, once,
+# synchronously, before any runner exists to be restarted. The weekly bake (scaler/bake.sh) has
+# already installed most of them, so this stays short. A kernel installed here takes effect only
+# on a reboot, which a short-lived pool server never does.
 systemctl disable --now apt-daily.timer apt-daily-upgrade.timer \
   || echo "pool: cannot disable the apt timers" >&2
 systemctl stop apt-daily.service apt-daily-upgrade.service \
   || echo "pool: cannot stop a running apt upgrade" >&2
+# A failed or timed-out upgrade must not keep the server from registering: without runners it
+# is useless and the pool would only create another one.
+DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a timeout 600 bash -c \
+  'apt-get update -q && apt-get -yq -o Dpkg::Options::=--force-confold upgrade' \
+  || echo "pool: boot-time security upgrade failed or timed out" >&2
+# From here on needrestart only lists what it would restart, so nothing restarts a runner after
+# it registers.
 mkdir -p "$ETC/needrestart/conf.d"
 cat > "$ETC/needrestart/conf.d/pool.conf" <<'NEEDRESTART'
 # Pool server: list services that use old libraries, never restart one (a runner or docker
