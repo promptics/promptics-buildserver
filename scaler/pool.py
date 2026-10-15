@@ -78,6 +78,13 @@ def should_remove(created: dt.datetime, now: dt.datetime, busy: bool, queued: in
     return queued == 0 or broken
 
 
+def may_reap(busy_states) -> bool:
+    """Whether a server may go, given the busy state of each of its runners right before the
+    reap: True (holds a job), False (idle) or None (could not be read). Fail safe: only a server
+    whose every runner is known to be idle goes."""
+    return all(state is False for state in busy_states)
+
+
 def stray_bake(created: dt.datetime, now: dt.datetime) -> bool:
     """A bake server outlives its workflow only when that workflow died before its cleanup step."""
     return (now - created).total_seconds() / 60 > BAKE_MAX_MIN
@@ -227,16 +234,43 @@ class Pool:
             else:
                 sys.exit(f"no candidate could place {name}: {' '.join(':'.join(c) for c in self.candidates)}")
 
+    def runner_busy(self, runner):
+        """The runner's busy state read fresh from GitHub: True, False, or None when it cannot
+        be read. A runner that no longer exists holds no job."""
+        try:
+            busy = self.gh(f"/orgs/{self.org}/actions/runners/{runner['id']}").get("busy")
+        except urllib.error.HTTPError as e:
+            return False if e.code == 404 else None
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+        return busy if isinstance(busy, bool) else None
+
     def remove(self, server, runners):
-        print(f"remove {server['name']} (idle, minute {minute_of_billing_hour(created(server), utcnow())} of its hour)")
+        """Deletes the server unless one of its runners holds a job. The runner list the sweep
+        decided on is minutes old by now, so every runner's busy state is read again here."""
+        minute = minute_of_billing_hour(created(server), utcnow())
+        states = []
+        for r in runners:
+            state = self.runner_busy(r)
+            states.append(state)
+            print(f"  runner {r['name']}: busy={'unknown' if state is None else str(state).lower()}")
+        if not may_reap(states):
+            print(f"keep {server['name']} (minute {minute} of its hour): a runner is busy or its state is unknown")
+            return False
+        print(f"remove {server['name']} (idle, minute {minute} of its hour)")
         if self.dry:
-            return
+            return True
+        # Deregistering first stops GitHub from giving the runner another job. A runner that
+        # cannot be deregistered may have just taken one, so its server stays.
         for r in runners:
             try:
                 self.gh(f"/orgs/{self.org}/actions/runners/{r['id']}", "DELETE")
             except urllib.error.HTTPError as e:
-                print(f"  runner {r['name']}: {e.code}")
+                if e.code != 404:
+                    print(f"  runner {r['name']}: {e.code} deregistering it; keeping {server['name']}")
+                    return False
         self.hc(f"/servers/{server['id']}", "DELETE")
+        return True
 
     def reconcile(self):
         now = utcnow()
