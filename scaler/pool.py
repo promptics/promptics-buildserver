@@ -221,6 +221,9 @@ class Pool:
                     "user_data": user_data,
                     "labels": {"pool": self.pool},
                     "start_after_create": True,
+                    # IPv4 only: each primary IP counts against the account's limit, and nothing a
+                    # job reaches needs IPv6.
+                    "public_net": {"enable_ipv4": True, "enable_ipv6": False},
                 }
                 print(f"create {name} ({server_type}, {location}, image {image or 'ubuntu-24.04 + bake'})")
                 if self.dry:
