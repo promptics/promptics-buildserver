@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 
 REAPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scaler", "reaper.sh")
@@ -25,6 +26,11 @@ STUBS = {
         echo "$*" >> "$STATE/kills"
         if [ "$1" = -STOP ] && [ -e "$STATE/job-on-freeze" ]; then
           cat "$STATE/job-on-freeze" >> "$STATE/procs"; rm "$STATE/job-on-freeze"
+        fi
+        # $STATE/log-on-freeze names a runner whose job ends as the listeners freeze.
+        if [ "$1" = -STOP ] && [ -e "$STATE/log-on-freeze" ]; then
+          d=$(cat "$STATE/log-on-freeze"); rm "$STATE/log-on-freeze"
+          mkdir -p "$d/_diag" && echo job > "$d/_diag/Worker_20261013-180000-utc.log"
         fi
     """,
     "curl": """
@@ -142,6 +148,39 @@ class Reaper(unittest.TestCase):
         self.write("procs", "300 /elsewhere/bin/Runner.Worker spawnclient 1 2\n", "a")
         self.run_at(52)
         self.assertFalse(self.deleted())
+
+    def worker_log(self, i, age_seconds):
+        diag = os.path.join(self.slot(i), "_diag")
+        os.makedirs(diag, exist_ok=True)
+        path = os.path.join(diag, "Worker_20261013-180000-utc.log")
+        with open(path, "w") as f:
+            f.write("job\n")
+        then = time.time() - age_seconds
+        os.utime(path, (then, then))
+
+    def test_a_runner_between_two_jobs_keeps_the_server(self):
+        # Its last job ended seconds ago and GitHub is handing it the next one: no worker runs yet,
+        # but the worker log of the job before was written just now.
+        self.worker_log(2, age_seconds=5)
+        self.run_at(52)
+        self.assertFalse(self.deleted())
+        self.assertEqual(self.read("kills"), "")
+        self.assertIn("runner pool-x-2 busy=recent", self.read("log"))
+
+    def test_a_runner_quiet_for_minutes_lets_the_server_go(self):
+        self.worker_log(2, age_seconds=10 * 60)
+        self.run_at(52)
+        self.assertTrue(self.deleted())
+        self.assertIn("runner pool-x-2 busy=idle", self.read("log"))
+
+    def test_a_job_handed_over_while_the_listeners_freeze_keeps_the_server(self):
+        # The job before ends between the first check and the freeze: the frozen re-check sees
+        # its fresh worker log although the next job's worker never started.
+        self.write("log-on-freeze", self.slot(1))
+        self.run_at(55)
+        self.assertFalse(self.deleted())
+        self.assertIn("(frozen): runner pool-x-1 busy=recent", self.read("log"))
+        self.assertIn("-CONT 101 102", self.read("kills"))
 
     def test_a_failed_delete_thaws_the_listeners(self):
         self.write("delete-fails", "")

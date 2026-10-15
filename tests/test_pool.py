@@ -151,6 +151,32 @@ class SweepRemove(unittest.TestCase):
         self.assertFalse(self.server_deleted(p))
 
 
+class DropOrphans(unittest.TestCase):
+    def setUp(self):
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
+
+    def test_an_offline_runner_of_a_deleted_server_is_deregistered(self):
+        p = FakePool({})
+        p.drop_orphans([{"id": 1, "name": "pool-1-1", "status": "offline"},
+                        {"id": 2, "name": "pool-2-1", "status": "offline"},
+                        {"id": 3, "name": "pool-3-1", "status": "online"}], {"pool-2"})
+        self.assertEqual(p.calls, [("DELETE", "/orgs/org/actions/runners/1")])
+
+    def test_a_lost_job_github_still_counts_as_running_is_no_error(self):
+        # A runner whose server went away mid-job stays busy until GitHub fails that job.
+        p = FakePool({}, deregister_errors={1: 422})
+        p.drop_orphans([{"id": 1, "name": "pool-1-1", "status": "offline"},
+                        {"id": 2, "name": "pool-2-1", "status": "offline"}], set())
+        self.assertIn(("DELETE", "/orgs/org/actions/runners/2"), p.calls)
+
+    def test_other_errors_still_fail_the_run(self):
+        p = FakePool({}, deregister_errors={1: 500})
+        with self.assertRaises(urllib.error.HTTPError):
+            p.drop_orphans([{"id": 1, "name": "pool-1-1", "status": "offline"}], set())
+
+
 class StrayBake(unittest.TestCase):
     def test_a_bake_within_its_workflow_timeout_is_left_alone(self):
         self.assertFalse(pool.stray_bake(T0, at(40)))
