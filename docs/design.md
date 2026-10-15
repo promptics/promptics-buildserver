@@ -23,6 +23,13 @@ the listeners. A runner whose state cannot be read counts as busy. The controlle
 each runner's `busy` from GitHub again right before it removes a server, and keeps the server
 when a runner is busy, unreadable, or refuses to be deregistered.
 
+**Nothing else restarts a runner either.** A stock Ubuntu server runs unattended-upgrades within
+its first hour, and needrestart then restarts every service that maps an upgraded library, the
+runner services among them, which cancels their jobs just as a reaper would. So a pool server
+turns the apt timers off at boot, before its runners register, and needrestart only lists what it
+would restart. Security updates reach the pool through the weekly bake, which upgrades the
+snapshot's packages.
+
 **A webhook starts the controller.** Scheduled workflows can fire hours apart, so they cannot be
 what gives a queued job its server. The organisation's `workflow_job` webhook reaches a small
 Worker, which checks the signature and, for a queued job carrying a pool label, dispatches
