@@ -280,7 +280,6 @@ class Pool:
         servers = self.servers()
         runners = self.runners()
         queued = self.queued_jobs()
-        names = {s["name"] for s in servers}
 
         def own(server):
             return [r for r in runners if r["name"].startswith(server["name"] + "-")]
@@ -310,13 +309,25 @@ class Pool:
                 if not self.dry:
                     self.hc(f"/servers/{b['id']}", "DELETE")
 
-        # runners whose server is gone stay listed as offline; drop them
+        self.drop_orphans(runners, {s["name"] for s in servers})
+
+    def drop_orphans(self, runners, server_names):
+        """Runners whose server is gone stay listed as offline; deregisters them. GitHub refuses
+        (422) while it still counts such a runner's lost job as running: the job fails on its own
+        and a later run deregisters the runner, so that is no error."""
         for r in runners:
             server_name = r["name"].rsplit("-", 1)[0]
-            if r["status"] == "offline" and server_name not in names:
-                print(f"deregister orphan runner {r['name']}")
-                if not self.dry:
-                    self.gh(f"/orgs/{self.org}/actions/runners/{r['id']}", "DELETE")
+            if r["status"] != "offline" or server_name in server_names:
+                continue
+            print(f"deregister orphan runner {r['name']}")
+            if self.dry:
+                continue
+            try:
+                self.gh(f"/orgs/{self.org}/actions/runners/{r['id']}", "DELETE")
+            except urllib.error.HTTPError as e:
+                if e.code != 422:
+                    raise
+                print(f"  {r['name']}: GitHub still counts a job as running on it; a later run retries")
 
 
 def utcnow():
