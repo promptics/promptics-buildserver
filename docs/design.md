@@ -15,6 +15,14 @@ so `scaler/reaper.sh` runs every minute on the server. That puts a Hetzner token
 which is acceptable only because the pool has a project of its own: at worst the token deletes
 servers of its own pool.
 
+**A server holding a job is never removed.** Stopping a runner service while it holds a job
+cancels the job, and a job can land between any check and the stop. So the reaper never stops a
+runner: it checks every runner, freezes the runner listeners with SIGSTOP so none can take a new
+job, checks again, and deletes the server only if every runner is still idle; otherwise it thaws
+the listeners. A runner whose state cannot be read counts as busy. The controller's sweep reads
+each runner's `busy` from GitHub again right before it removes a server, and keeps the server
+when a runner is busy, unreadable, or refuses to be deregistered.
+
 **A webhook starts the controller.** Scheduled workflows can fire hours apart, so they cannot be
 what gives a queued job its server. The organisation's `workflow_job` webhook reaches a small
 Worker, which checks the signature and, for a queued job carrying a pool label, dispatches
