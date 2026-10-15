@@ -40,8 +40,8 @@ jobs:
             org: promptics
             repos: ""        # every repo of the org: a run always scans them all, since concurrency keeps only the newest pending run
             candidates: "cx43:fsn1 cx43:nbg1 cx43:hel1 cpx42:fsn1 cpx42:nbg1 cpx42:hel1"
-            max_servers: 2
-            slots: 2
+            max_servers: 3   # one job per server: two builds on one 8-vCPU server ran past their time limit
+            slots: 1
             token: HCLOUD_TOKEN_CI
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
