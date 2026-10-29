@@ -13,6 +13,9 @@ Every pool works the same way and runs this same file, configured by environment
   MAX_SERVERS     upper bound on servers in the pool (default 2)
   SLOTS           runners per server (default 2)
   HCLOUD_TOKEN    read/write token of the pool's own Hetzner project
+  HCLOUD_SSH_KEY  name of an SSH key in the pool's Hetzner project; every server is created with it,
+                  so Hetzner sends no root-password email. Required: with it unset, or naming a key
+                  the project does not have, nothing is created and the run fails
   GH_TOKEN        classic PAT with admin:org (org runner registration and removal) and repo
                   (reading queued jobs of private repos)
   DRY_RUN         "1": decide and print, change nothing
@@ -123,6 +126,7 @@ class Pool:
         self.max_servers = int(env("MAX_SERVERS", "2"))
         self.slots = int(env("SLOTS", "2"))
         self.hc_token = env("HCLOUD_TOKEN")
+        self.ssh_key = env("HCLOUD_SSH_KEY")
         self.gh_token = env("GH_TOKEN")
         self.dry = os.environ.get("DRY_RUN") == "1"
 
@@ -137,6 +141,14 @@ class Pool:
     def bake_servers(self):
         sel = urllib.parse.quote(f"pool-bake={self.pool}")
         return self.hc(f"/servers?label_selector={sel}&per_page=50")["servers"]
+
+    def require_ssh_key(self):
+        """Exits unless the configured SSH key exists in the project: a server created without a
+        key makes Hetzner mail out a root password."""
+        found = self.hc(f"/ssh_keys?name={urllib.parse.quote(self.ssh_key)}")["ssh_keys"]
+        if not any(k["name"] == self.ssh_key for k in found):
+            sys.exit("HCLOUD_SSH_KEY: the configured SSH key does not exist in the Hetzner project; "
+                     "nothing was created. Set HCLOUD_SSH_KEY to the name of an existing key.")
 
     def image(self):
         """The newest snapshot baked for this pool, or None (then the server bakes at boot)."""
@@ -190,6 +202,7 @@ class Pool:
     def create(self, n, now):
         if n <= 0:
             return
+        self.require_ssh_key()
         reg = "dry-run" if self.dry else self.gh(f"/orgs/{self.org}/actions/runners/registration-token", "POST")["token"]
         image = self.image()
         boot = open(os.path.join(HERE, "runner-boot.sh")).read()
@@ -219,6 +232,7 @@ class Pool:
                     "location": location,
                     "image": image or "ubuntu-24.04",
                     "user_data": user_data,
+                    "ssh_keys": [self.ssh_key],
                     "labels": {"pool": self.pool},
                     "start_after_create": True,
                     # IPv4 only: each primary IP counts against the account's limit, and nothing a
