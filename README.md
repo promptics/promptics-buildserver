@@ -34,8 +34,8 @@ jobs:
    private repositories).
 3. Repository variable `HCLOUD_SSH_KEY`: the name of an SSH key that exists in the pool's Hetzner
    project. Every server the scaler and the bake workflow create carries it, so Hetzner sends no
-   root-password email. With it unset, or naming a missing key, the scaler creates nothing (sweeping and deleting idle servers still run) and
-   fails, and the bake workflow fails.
+   root-password email. With it unset, or naming a missing key, the scaler creates nothing and
+   fails after its cleanup has run, and the bake workflow fails.
 4. Run `pool bake` once; afterwards it runs weekly.
 5. Deploy the Worker (`cd webhook && npx wrangler@4 deploy`, secrets `WEBHOOK_SECRET` and
    `DISPATCH_TOKEN` via `wrangler secret put`) and point an organisation webhook for

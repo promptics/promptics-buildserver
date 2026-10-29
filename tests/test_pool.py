@@ -231,9 +231,8 @@ class CreateWithSshKey(unittest.TestCase):
 
     def test_an_unknown_key_creates_nothing_and_names_the_setting(self):
         p, calls = self.make(key="ci-key", project_keys=("other",))
-        with self.assertRaises(SystemExit) as cm:
-            p.create(1, T0)
-        self.assertIn("HCLOUD_SSH_KEY", str(cm.exception))
+        error = p.create(1, T0)
+        self.assertIn("HCLOUD_SSH_KEY", error)
         self.assertEqual(self.posts(calls), [])
         self.assertFalse([c for c in calls if c[1].startswith("/orgs")])
 
@@ -243,14 +242,44 @@ class CreateWithSshKey(unittest.TestCase):
                 "HCLOUD_TOKEN": "x", "GH_TOKEN": "y", "HCLOUD_SSH_KEY": ""}):
             self.assertEqual(pool.Pool().ssh_key, "")
         p, calls = self.make(key="")
-        with self.assertRaises(SystemExit) as cm:
-            p.create(1, T0)
-        self.assertIn("HCLOUD_SSH_KEY", str(cm.exception))
+        self.assertIn("HCLOUD_SSH_KEY", p.create(1, T0))
         self.assertEqual(self.posts(calls), [])
-        sweeper = FakePool({1: {"busy": False}, 2: {"busy": False}})
-        sweeper.ssh_key = ""
-        self.assertTrue(sweeper.remove(SERVER, RUNNERS))
-        self.assertIn(("DELETE", "/servers/7"), sweeper.calls)
+
+    def test_reconcile_cleans_up_before_failing_on_a_missing_key(self):
+        calls = []
+
+        class P(pool.Pool):
+            def __init__(self):
+                self.pool, self.org, self.slots, self.dry = "pool", "org", 1, False
+                self.max_servers, self.candidates, self.ssh_key = 8, [("cx43", "fsn1")], ""
+                self.hc_token = "token"
+
+            def servers(self):
+                return [SERVER]
+
+            def bake_servers(self):
+                return []
+
+            def runners(self):
+                return [{"id": 1, "name": "pool-1-1", "status": "offline", "busy": False}]
+
+            def queued_jobs(self):
+                return 3
+
+            def gh(self, path, method="GET", body=None):
+                calls.append((method, path))
+                return {"busy": False}
+
+            def hc(self, path, method="GET", body=None):
+                calls.append((method, path))
+                return {}
+
+        with unittest.mock.patch.object(pool, "utcnow", lambda: at(52)):
+            with self.assertRaises(SystemExit) as cm:
+                P().reconcile()
+        self.assertIn("HCLOUD_SSH_KEY", str(cm.exception))
+        self.assertIn(("DELETE", "/servers/7"), calls)
+        self.assertFalse([c for c in calls if c == ("POST", "/servers")])
 
 
 if __name__ == "__main__":
