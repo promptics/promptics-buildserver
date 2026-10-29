@@ -201,6 +201,7 @@ class CreateWithSshKey(unittest.TestCase):
             def __init__(self):
                 self.pool, self.org, self.slots, self.dry = "pool", "org", 1, False
                 self.candidates = [("cx43", "fsn1")]
+                self.hc_token = "token"
                 self.ssh_key = key
 
             def gh(self, path, method="GET", body=None):
