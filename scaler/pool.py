@@ -13,6 +13,10 @@ Every pool works the same way and runs this same file, configured by environment
   MAX_SERVERS     upper bound on servers in the pool (default 2)
   SLOTS           runners per server (default 2)
   HCLOUD_TOKEN    read/write token of the pool's own Hetzner project
+  HCLOUD_SSH_KEY  name of an SSH key in the pool's Hetzner project; every server is created with it,
+                  so Hetzner sends no root-password email. Required to create: with it unset, or naming
+                  a key the project does not have, no server is created and the run fails; the sweep
+                  and cleanup still run first, then the run exits non-zero
   GH_TOKEN        classic PAT with admin:org (org runner registration and removal) and repo
                   (reading queued jobs of private repos)
   DRY_RUN         "1": decide and print, change nothing
@@ -123,6 +127,7 @@ class Pool:
         self.max_servers = int(env("MAX_SERVERS", "2"))
         self.slots = int(env("SLOTS", "2"))
         self.hc_token = env("HCLOUD_TOKEN")
+        self.ssh_key = os.environ.get("HCLOUD_SSH_KEY", "")   # checked in create(): deleting never needs it
         self.gh_token = env("GH_TOKEN")
         self.dry = os.environ.get("DRY_RUN") == "1"
 
@@ -137,6 +142,18 @@ class Pool:
     def bake_servers(self):
         sel = urllib.parse.quote(f"pool-bake={self.pool}")
         return self.hc(f"/servers?label_selector={sel}&per_page=50")["servers"]
+
+    def ssh_key_error(self):
+        """Why no server may be created, or None. A server created without the configured SSH key
+        makes Hetzner mail out a root password."""
+        if not self.ssh_key:
+            return ("HCLOUD_SSH_KEY is required to create servers: set the repository variable to the "
+                    "name of an SSH key in the Hetzner project. Nothing was created.")
+        found = self.hc(f"/ssh_keys?name={urllib.parse.quote(self.ssh_key)}")["ssh_keys"]
+        if not any(k["name"] == self.ssh_key for k in found):
+            return ("HCLOUD_SSH_KEY: the configured SSH key does not exist in the Hetzner project; "
+                    "nothing was created. Set HCLOUD_SSH_KEY to the name of an existing key.")
+        return None
 
     def image(self):
         """The newest snapshot baked for this pool, or None (then the server bakes at boot)."""
@@ -188,8 +205,14 @@ class Pool:
 
     # actions
     def create(self, n, now):
+        """Creates n servers. Returns an error message, creating nothing, when the SSH key is not
+        usable; the caller finishes its cleanup first and then fails with it."""
         if n <= 0:
-            return
+            return None
+        error = self.ssh_key_error()
+        if error:
+            print(error)
+            return error
         reg = "dry-run" if self.dry else self.gh(f"/orgs/{self.org}/actions/runners/registration-token", "POST")["token"]
         image = self.image()
         boot = open(os.path.join(HERE, "runner-boot.sh")).read()
@@ -219,6 +242,7 @@ class Pool:
                     "location": location,
                     "image": image or "ubuntu-24.04",
                     "user_data": user_data,
+                    "ssh_keys": [self.ssh_key],
                     "labels": {"pool": self.pool},
                     "start_after_create": True,
                     # IPv4 only: each primary IP counts against the account's limit, and nothing a
@@ -236,6 +260,7 @@ class Pool:
                     print(f"  {server_type} in {location}: {reason}; trying the next candidate")
             else:
                 sys.exit(f"no candidate could place {name}: {' '.join(':'.join(c) for c in self.candidates)}")
+        return None
 
     def runner_busy(self, runner):
         """The runner's busy state read fresh from GitHub: True, False, or None when it cannot
@@ -292,7 +317,7 @@ class Pool:
               f"{idle} idle slot(s), {booting} booting slot(s), {queued} queued job(s)")
 
         # reuse is GitHub's routing; create for what it cannot cover
-        self.create(servers_to_create(queued, idle, booting, len(servers), self.max_servers, self.slots), now)
+        create_error = self.create(servers_to_create(queued, idle, booting, len(servers), self.max_servers, self.slots), now)
 
         # sweep what a reaper missed
         for s in servers:
@@ -310,6 +335,8 @@ class Pool:
                     self.hc(f"/servers/{b['id']}", "DELETE")
 
         self.drop_orphans(runners, {s["name"] for s in servers})
+        if create_error:
+            sys.exit(create_error)
 
     def drop_orphans(self, runners, server_names):
         """Runners whose server is gone stay listed as offline; deregisters them. GitHub refuses

@@ -4,6 +4,7 @@ import io
 import os
 import sys
 import unittest
+import unittest.mock
 import urllib.error
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scaler"))
@@ -183,6 +184,102 @@ class StrayBake(unittest.TestCase):
 
     def test_a_bake_server_older_than_any_bake_workflow_goes(self):
         self.assertTrue(pool.stray_bake(T0, at(46)))
+
+
+class CreateWithSshKey(unittest.TestCase):
+    """Server creation carries the configured SSH key, or creates nothing."""
+
+    def setUp(self):
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
+
+    def make(self, key="ci-key", project_keys=("ci-key",)):
+        calls = []
+
+        class P(pool.Pool):
+            def __init__(self):
+                self.pool, self.org, self.slots, self.dry = "pool", "org", 1, False
+                self.candidates = [("cx43", "fsn1")]
+                self.hc_token = "token"
+                self.ssh_key = key
+
+            def gh(self, path, method="GET", body=None):
+                calls.append((method, path, body))
+                return {"token": "t"}
+
+            def hc(self, path, method="GET", body=None):
+                calls.append((method, path, body))
+                if path.startswith("/ssh_keys"):
+                    return {"ssh_keys": [{"name": k} for k in project_keys if f"name={k}" in path]}
+                return {}
+
+            def image(self):
+                return 1
+
+        return P(), calls
+
+    def posts(self, calls):
+        return [c for c in calls if c[0] == "POST" and c[1] == "/servers"]
+
+    def test_the_key_is_in_the_create_body(self):
+        p, calls = self.make()
+        p.create(1, T0)
+        posts = self.posts(calls)
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0][2]["ssh_keys"], ["ci-key"])
+
+    def test_an_unknown_key_creates_nothing_and_names_the_setting(self):
+        p, calls = self.make(key="ci-key", project_keys=("other",))
+        error = p.create(1, T0)
+        self.assertIn("HCLOUD_SSH_KEY", error)
+        self.assertEqual(self.posts(calls), [])
+        self.assertFalse([c for c in calls if c[1].startswith("/orgs")])
+
+    def test_a_missing_setting_refuses_to_create_but_never_blocks_a_sweep(self):
+        with unittest.mock.patch.dict(os.environ, {
+                "POOL": "pool", "ORG": "org", "CANDIDATES": "cx43:fsn1",
+                "HCLOUD_TOKEN": "x", "GH_TOKEN": "y", "HCLOUD_SSH_KEY": ""}):
+            self.assertEqual(pool.Pool().ssh_key, "")
+        p, calls = self.make(key="")
+        self.assertIn("HCLOUD_SSH_KEY", p.create(1, T0))
+        self.assertEqual(self.posts(calls), [])
+
+    def test_reconcile_cleans_up_before_failing_on_a_missing_key(self):
+        calls = []
+
+        class P(pool.Pool):
+            def __init__(self):
+                self.pool, self.org, self.slots, self.dry = "pool", "org", 1, False
+                self.max_servers, self.candidates, self.ssh_key = 8, [("cx43", "fsn1")], ""
+                self.hc_token = "token"
+
+            def servers(self):
+                return [SERVER]
+
+            def bake_servers(self):
+                return []
+
+            def runners(self):
+                return [{"id": 1, "name": "pool-1-1", "status": "offline", "busy": False}]
+
+            def queued_jobs(self):
+                return 3
+
+            def gh(self, path, method="GET", body=None):
+                calls.append((method, path))
+                return {"busy": False}
+
+            def hc(self, path, method="GET", body=None):
+                calls.append((method, path))
+                return {}
+
+        with unittest.mock.patch.object(pool, "utcnow", lambda: at(52)):
+            with self.assertRaises(SystemExit) as cm:
+                P().reconcile()
+        self.assertIn("HCLOUD_SSH_KEY", str(cm.exception))
+        self.assertIn(("DELETE", "/servers/7"), calls)
+        self.assertFalse([c for c in calls if c == ("POST", "/servers")])
 
 
 if __name__ == "__main__":

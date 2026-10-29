@@ -5,6 +5,10 @@
 # The servers delete themselves at the end of an idle billing hour (scaler/reaper.sh); this
 # controller creates what demand needs and sweeps what a dead reaper left behind.
 #
+# Repository variable:
+#   HCLOUD_SSH_KEY    name of an SSH key in the pool's Hetzner project; every server is created with it
+#                     so Hetzner sends no root-password email. Required: the run fails without it.
+#
 # Secrets (repository secrets; the promptics org is on GitHub Free, no org secrets):
 #   HCLOUD_TOKEN_CI   read/write token of the pool's own Hetzner Cloud project (it reaches nothing else)
 #   RUNNER_PAT        classic PAT with admin:org (org runner registration/removal)
@@ -54,6 +58,7 @@ jobs:
           MAX_SERVERS: ${{ matrix.max_servers }}
           SLOTS: ${{ matrix.slots }}
           HCLOUD_TOKEN: ${{ secrets[matrix.token] }}
+          HCLOUD_SSH_KEY: ${{ vars.HCLOUD_SSH_KEY }}
           GH_TOKEN: ${{ secrets.RUNNER_PAT }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: python3 scaler/pool.py reconcile

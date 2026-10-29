@@ -32,8 +32,12 @@ jobs:
 2. Repository secrets: `HCLOUD_TOKEN_CI` (that token) and `RUNNER_PAT` (a classic PAT with
    `admin:org` to register and remove organisation runners, and `repo` to read queued jobs of
    private repositories).
-3. Run `pool bake` once; afterwards it runs weekly.
-4. Deploy the Worker (`cd webhook && npx wrangler@4 deploy`, secrets `WEBHOOK_SECRET` and
+3. Repository variable `HCLOUD_SSH_KEY`: the name of an SSH key that exists in the pool's Hetzner
+   project. Every server the scaler and the bake workflow create carries it, so Hetzner sends no
+   root-password email. With it unset, or naming a missing key, the scaler creates nothing and
+   fails after its cleanup has run, and the bake workflow fails.
+4. Run `pool bake` once; afterwards it runs weekly.
+5. Deploy the Worker (`cd webhook && npx wrangler@4 deploy`, secrets `WEBHOOK_SECRET` and
    `DISPATCH_TOKEN` via `wrangler secret put`) and point an organisation webhook for
    `workflow_job` events at it.
 
