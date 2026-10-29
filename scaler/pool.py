@@ -14,8 +14,9 @@ Every pool works the same way and runs this same file, configured by environment
   SLOTS           runners per server (default 2)
   HCLOUD_TOKEN    read/write token of the pool's own Hetzner project
   HCLOUD_SSH_KEY  name of an SSH key in the pool's Hetzner project; every server is created with it,
-                  so Hetzner sends no root-password email. Required: with it unset, or naming a key
-                  the project does not have, nothing is created and the run fails
+                  so Hetzner sends no root-password email. Required to create: with it unset, or naming
+                  a key the project does not have, no server is created and the run fails; the sweep
+                  and removal of idle servers still run
   GH_TOKEN        classic PAT with admin:org (org runner registration and removal) and repo
                   (reading queued jobs of private repos)
   DRY_RUN         "1": decide and print, change nothing
@@ -126,7 +127,7 @@ class Pool:
         self.max_servers = int(env("MAX_SERVERS", "2"))
         self.slots = int(env("SLOTS", "2"))
         self.hc_token = env("HCLOUD_TOKEN")
-        self.ssh_key = env("HCLOUD_SSH_KEY")
+        self.ssh_key = os.environ.get("HCLOUD_SSH_KEY", "")   # checked in create(): deleting never needs it
         self.gh_token = env("GH_TOKEN")
         self.dry = os.environ.get("DRY_RUN") == "1"
 
@@ -145,6 +146,9 @@ class Pool:
     def require_ssh_key(self):
         """Exits unless the configured SSH key exists in the project: a server created without a
         key makes Hetzner mail out a root password."""
+        if not self.ssh_key:
+            sys.exit("HCLOUD_SSH_KEY is required to create servers: set the repository variable to the "
+                     "name of an SSH key in the Hetzner project. Nothing was created.")
         found = self.hc(f"/ssh_keys?name={urllib.parse.quote(self.ssh_key)}")["ssh_keys"]
         if not any(k["name"] == self.ssh_key for k in found):
             sys.exit("HCLOUD_SSH_KEY: the configured SSH key does not exist in the Hetzner project; "

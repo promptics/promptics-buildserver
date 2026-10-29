@@ -237,13 +237,20 @@ class CreateWithSshKey(unittest.TestCase):
         self.assertEqual(self.posts(calls), [])
         self.assertFalse([c for c in calls if c[1].startswith("/orgs")])
 
-    def test_a_missing_setting_fails_before_anything_is_created(self):
+    def test_a_missing_setting_refuses_to_create_but_never_blocks_a_sweep(self):
         with unittest.mock.patch.dict(os.environ, {
                 "POOL": "pool", "ORG": "org", "CANDIDATES": "cx43:fsn1",
                 "HCLOUD_TOKEN": "x", "GH_TOKEN": "y", "HCLOUD_SSH_KEY": ""}):
-            with self.assertRaises(SystemExit) as cm:
-                pool.Pool()
+            self.assertEqual(pool.Pool().ssh_key, "")
+        p, calls = self.make(key="")
+        with self.assertRaises(SystemExit) as cm:
+            p.create(1, T0)
         self.assertIn("HCLOUD_SSH_KEY", str(cm.exception))
+        self.assertEqual(self.posts(calls), [])
+        sweeper = FakePool({1: {"busy": False}, 2: {"busy": False}})
+        sweeper.ssh_key = ""
+        self.assertTrue(sweeper.remove(SERVER, RUNNERS))
+        self.assertIn(("DELETE", "/servers/7"), sweeper.calls)
 
 
 if __name__ == "__main__":
