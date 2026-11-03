@@ -46,15 +46,19 @@ class RunnerBoot(unittest.TestCase):
         for i in (1, 2):
             d = os.path.join(self.dir, f"actions-runner-{i}")
             os.makedirs(d)
-            self.script(os.path.join(d, "config.sh"), f'echo "config.sh slot {i}" >> "$STATE/calls"')
-            self.script(os.path.join(d, "svc.sh"), f'echo "svc.sh slot {i} $*" >> "$STATE/calls"')
+            self.script(os.path.join(d, "config.sh"),
+                        f'echo "config.sh slot {i}" >> "$STATE/calls"; echo "$*" > "$STATE/config-args-{i}"')
+            self.script(os.path.join(d, "svc.sh"),
+                        f'echo "svc.sh slot {i} $*" >> "$STATE/calls"\n'
+                        f'[ "$1" = start ] && grep -q "^ACTIONS_RUNNER_HOOK_JOB_STARTED=" .env 2>/dev/null'
+                        f' && echo "hook set at start, slot {i}" >> "$STATE/calls"\nexit 0')
 
     def script(self, path, body):
         with open(path, "w") as f:
             f.write("#!/bin/bash\n" + textwrap.dedent(body))
         os.chmod(path, 0o755)
 
-    def boot(self):
+    def boot(self, **extra):
         env = {
             "PATH": self.bin + os.pathsep + os.environ["PATH"],
             "STATE": self.state,
@@ -62,6 +66,7 @@ class RunnerBoot(unittest.TestCase):
             "POOL_RUNNER_ROOT": self.dir,
             "ORG": "org", "POOL": "pool", "NAME": "pool-x", "SLOTS": "2", "REG_TOKEN": "r",
             "HCLOUD_TOKEN": "t", "REMOVE_FROM": "50", "REMOVE_UNTIL": "58",
+            **extra,
         }
         # pool.py runs this script under these options; a failing command must not end the boot.
         script = f'set -euo pipefail; source "{BOOT}"'
@@ -125,6 +130,50 @@ class RunnerBoot(unittest.TestCase):
         self.boot()
         self.assertIn("systemctl enable --now pool-reaper.timer", self.calls())
         self.assertTrue(os.path.exists(os.path.join(self.etc, "pool-born")))
+
+    def read(self, *path):
+        full = os.path.join(*path)
+        if not os.path.exists(full):
+            return ""
+        with open(full) as f:
+            return f.read()
+
+    def one_job_boot(self):
+        result = self.boot(ONE_JOB="1", EVENTS="schedule workflow_dispatch", ALLOWED_REPOS="repo",
+                           POOL_GUARD_BIN="/guard")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_shared_pool_registers_reusable_runners_without_a_guard(self):
+        self.boot()
+        self.assertNotIn("--ephemeral", self.read(self.state, "config-args-1"))
+        self.assertNotIn("--disableupdate", self.read(self.state, "config-args-1"))
+        self.assertNotIn("ACTIONS_RUNNER_HOOK_JOB_STARTED", self.read(self.dir, "actions-runner-1", ".env"))
+        self.assertFalse(os.path.exists(os.path.join(self.etc, "pool-job-guard.env")))
+        self.assertIn("ONE_JOB='0'", self.read(self.etc, "pool.env"))
+
+    def test_a_one_job_pool_registers_ephemeral_runners(self):
+        self.one_job_boot()
+        for i in (1, 2):
+            self.assertIn("--ephemeral", self.read(self.state, f"config-args-{i}"))
+            self.assertIn("--disableupdate", self.read(self.state, f"config-args-{i}"))
+        self.assertIn("ONE_JOB='1'", self.read(self.etc, "pool.env"))
+
+    def test_a_one_job_runner_runs_the_guard_before_every_job(self):
+        self.one_job_boot()
+        for i in (1, 2):
+            self.assertIn("ACTIONS_RUNNER_HOOK_JOB_STARTED=/guard",
+                          self.read(self.dir, f"actions-runner-{i}", ".env").splitlines())
+        guard_env = self.read(self.etc, "pool-job-guard.env")
+        self.assertIn("EVENTS='schedule workflow_dispatch'", guard_env)
+        self.assertIn("ALLOWED_REPOS='repo'", guard_env)
+        self.assertIn("ORG='org'", guard_env)
+
+    def test_the_guard_is_in_place_before_the_runner_starts(self):
+        # The runner reads .env when its service starts; the svc.sh stub records what it holds then.
+        self.one_job_boot()
+        calls = self.calls()
+        self.assertIn("hook set at start, slot 1", calls)
+        self.assertIn("hook set at start, slot 2", calls)
 
     def write_flag(self, name):
         open(os.path.join(self.state, name), "w").close()

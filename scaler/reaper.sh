@@ -21,6 +21,11 @@
 # is already running. With the listeners frozen the runners are checked again; only if all are
 # still idle is the server deleted. In every other case the listeners are thawed and the server
 # stays.
+#
+# A one-job pool (ONE_JOB=1) has ephemeral runners: each takes one job, and its listener exits
+# when that job ends. Such a server is deleted as soon as a job has run on it and neither a
+# listener nor a worker is left, at any minute: nothing can take a job any more, and the server
+# exists for that one job only. Until it has had its job it follows the rule above.
 set -u
 BOOT_LAG=2
 QUIET_MIN=${POOL_QUIET_MIN:-3}
@@ -31,8 +36,33 @@ HCLOUD_API=${POOL_HCLOUD_API:-https://api.hetzner.cloud/v1}
 
 log() { logger -t pool-reaper "$*"; }
 
+delete_server() {
+  local id
+  id=$(curl -fsS "$METADATA/instance-id") || { log "minute $minute: cannot read the instance id: keeping server"; exit 0; }
+  log "minute $minute: $1: deleting server $id"
+  if ! curl -fsS -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" "$HCLOUD_API/servers/${id}" >/dev/null; then
+    log "minute $minute: deleting server $id failed: keeping it"
+    exit 1
+  fi
+}
+
+# One-job pool: whether this server's job has run and nothing is left that could take another.
+# pgrep exits 1 when nothing matches; any other result counts as "not done".
+one_job_done() {
+  local logs
+  logs=$(find "$RUNNER_ROOT"/actions-runner-*/_diag -maxdepth 1 -name 'Worker_*.log' 2>/dev/null) || true
+  [ -n "$logs" ] || return 1
+  pgrep -f Runner.Worker >/dev/null; [ $? -eq 1 ] || return 1
+  pgrep -f Runner.Listener >/dev/null; [ $? -eq 1 ] || return 1
+  return 0
+}
+
 born=$(cat "$BORN_FILE") || { log "cannot read $BORN_FILE: keeping server"; exit 0; }
 minute=$(( ( ( $(date +%s) - born ) / 60 + BOOT_LAG ) % 60 ))
+if [ "${ONE_JOB:-0}" = 1 ] && one_job_done; then
+  delete_server "its one job has ended"
+  exit 0
+fi
 [ "$minute" -ge "$REMOVE_FROM" ] && [ "$minute" -lt "$REMOVE_UNTIL" ] || exit 0
 
 slots=()
@@ -92,11 +122,6 @@ done
 
 all_idle frozen || { log "minute $minute: a job started before the listeners froze: keeping server"; exit 0; }
 
-id=$(curl -fsS "$METADATA/instance-id") || { log "minute $minute: cannot read the instance id: keeping server"; exit 0; }
-log "minute $minute: every runner idle: deleting server $id"
-if ! curl -fsS -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" "$HCLOUD_API/servers/${id}" >/dev/null; then
-  log "minute $minute: deleting server $id failed: keeping it"
-  exit 1
-fi
+delete_server "every runner idle"
 # Deletion is under way; the listeners stay frozen so no job lands on a server that is going.
 frozen=()

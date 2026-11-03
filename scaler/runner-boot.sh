@@ -1,6 +1,7 @@
 # Registers SLOTS runners with the org under the pool's label and arms the reaper. Runs at
 # every boot of a pool server, from the user data pool.py writes (which exports ORG, POOL,
-# NAME, SLOTS, REG_TOKEN, HCLOUD_TOKEN and the removal window).
+# NAME, SLOTS, REG_TOKEN, HCLOUD_TOKEN, ONE_JOB and the removal window; a one-job pool also
+# EVENTS and ALLOWED_REPOS).
 ETC=${POOL_ETC:-/etc}
 RUNNER_ROOT=${POOL_RUNNER_ROOT:-/opt}
 # Nothing on a pool server may restart a runner service: a restart is a stop, and a stop cancels
@@ -37,12 +38,32 @@ cat > "$ETC/pool.env" <<ENV
 HCLOUD_TOKEN='${HCLOUD_TOKEN}'
 REMOVE_FROM='${REMOVE_FROM}'
 REMOVE_UNTIL='${REMOVE_UNTIL}'
+ONE_JOB='${ONE_JOB:-0}'
 ENV
 umask 022
+# A one-job pool: every runner is ephemeral (it takes one job, then GitHub removes it), and its
+# job-started hook refuses any job outside the pool's events and repositories (job-guard.sh). The
+# hook's lists are readable by the runner but writable only by root.
+ephemeral=""
+if [ "${ONE_JOB:-0}" = 1 ]; then
+  # --disableupdate: the runner never replaces its own binaries. GitHub serves such a runner
+  # for 30 days after a newer release; the weekly bake installs the latest one.
+  ephemeral="--ephemeral --disableupdate"
+  cat > "$ETC/pool-job-guard.env" <<GUARD
+ORG='${ORG}'
+EVENTS='${EVENTS}'
+ALLOWED_REPOS='${ALLOWED_REPOS}'
+GUARD
+  chmod 644 "$ETC/pool-job-guard.env"
+fi
 for i in $(seq 1 "$SLOTS"); do
   d=$RUNNER_ROOT/actions-runner-$i
   sudo -u runner bash -c "cd '$d' && ./config.sh --url 'https://github.com/${ORG}' --token '${REG_TOKEN}' \
-    --name '${NAME}-${i}' --labels '${POOL},linux,x64' --work _work --unattended --replace"
+    --name '${NAME}-${i}' --labels '${POOL},linux,x64' --work _work --unattended --replace ${ephemeral}"
+  if [ "${ONE_JOB:-0}" = 1 ]; then
+    # The runner reads .env in its directory at start; config.sh has written that file by now.
+    echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=${POOL_GUARD_BIN:-/usr/local/bin/pool-job-guard}" >> "$d/.env"
+  fi
   (cd "$d" && ./svc.sh install runner && ./svc.sh start)
 done
 cat > "$ETC/systemd/system/pool-reaper.service" <<UNIT

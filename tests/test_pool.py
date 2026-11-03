@@ -282,5 +282,118 @@ class CreateWithSshKey(unittest.TestCase):
         self.assertFalse([c for c in calls if c == ("POST", "/servers")])
 
 
+class OneJobPool(unittest.TestCase):
+    """A one-job pool serves only the events and repositories it lists; the shared pool is unchanged."""
+
+    EVENTS = ["schedule", "workflow_dispatch"]
+
+    def test_a_pull_request_job_asks_for_no_one_job_server(self):
+        self.assertFalse(pool.job_wanted("pull_request", ["self-hosted", "priv"], "priv", self.EVENTS))
+        self.assertFalse(pool.job_wanted("push", ["self-hosted", "priv"], "priv", self.EVENTS))
+
+    def test_a_scheduled_or_manual_job_asks_for_one(self):
+        self.assertTrue(pool.job_wanted("schedule", ["self-hosted", "priv"], "priv", self.EVENTS))
+        self.assertTrue(pool.job_wanted("workflow_dispatch", ["self-hosted", "priv"], "priv", self.EVENTS))
+
+    def test_a_job_for_another_label_asks_for_nothing(self):
+        self.assertFalse(pool.job_wanted("schedule", ["self-hosted", "promptics-pool"], "priv", self.EVENTS))
+
+    def test_the_shared_pool_takes_every_event(self):
+        self.assertTrue(pool.job_wanted("pull_request", ["self-hosted", "shared"], "shared", []))
+
+    def test_a_one_job_pool_needs_both_lists(self):
+        self.assertIn("REPOS", pool.one_job_config_error(True, [], self.EVENTS))
+        self.assertIn("EVENTS", pool.one_job_config_error(True, ["repo"], []))
+        self.assertIsNone(pool.one_job_config_error(True, ["repo"], self.EVENTS))
+        self.assertIsNone(pool.one_job_config_error(False, [], []))
+
+    def test_settings_come_from_the_environment(self):
+        with unittest.mock.patch.dict(os.environ, {
+                "POOL": "priv", "ORG": "org", "CANDIDATES": "cx43:fsn1", "HCLOUD_TOKEN": "x",
+                "GH_TOKEN": "y", "ONE_JOB": "1", "EVENTS": "schedule workflow_dispatch",
+                "REPOS": "a b", "IMAGE_POOL": "shared"}):
+            p = pool.Pool()
+        self.assertTrue(p.one_job)
+        self.assertEqual(p.events, self.EVENTS)
+        self.assertEqual(p.repos, ["a", "b"])
+        self.assertEqual(p.image_pool, "shared")
+
+    def test_without_the_settings_a_pool_stays_shared(self):
+        with unittest.mock.patch.dict(os.environ, {
+                "POOL": "shared", "ORG": "org", "CANDIDATES": "cx43:fsn1", "HCLOUD_TOKEN": "x",
+                "GH_TOKEN": "y", "ONE_JOB": "", "EVENTS": "", "IMAGE_POOL": ""}):
+            p = pool.Pool()
+        self.assertFalse(p.one_job)
+        self.assertEqual(p.events, [])
+        self.assertEqual(p.image_pool, "shared")
+
+    def make(self, one_job, repos=("repo",), events=("schedule", "workflow_dispatch")):
+        calls = []
+
+        class P(pool.Pool):
+            def __init__(self):
+                self.pool, self.org, self.slots, self.dry = "priv", "org", 1, False
+                self.candidates = [("cx43", "fsn1")]
+                self.hc_token, self.ssh_key = "token", "ci-key"
+                self.one_job, self.repos, self.events = one_job, list(repos), list(events)
+
+            def gh(self, path, method="GET", body=None):
+                calls.append((method, path, body))
+                return {"token": "t"}
+
+            def hc(self, path, method="GET", body=None):
+                calls.append((method, path, body))
+                if path.startswith("/ssh_keys"):
+                    return {"ssh_keys": [{"name": "ci-key"}]}
+                return {}
+
+            def image(self):
+                return 1
+
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        with quiet:
+            error = P().create(1, T0)
+        posts = [c[2] for c in calls if c[0] == "POST" and c[1] == "/servers"]
+        return error, posts
+
+    def test_a_one_job_server_carries_its_guard_and_lists(self):
+        error, posts = self.make(one_job=True)
+        self.assertIsNone(error)
+        user_data = posts[0]["user_data"]
+        self.assertIn("export ONE_JOB='1'", user_data)
+        self.assertIn("export EVENTS='schedule workflow_dispatch' ALLOWED_REPOS='repo'", user_data)
+        self.assertIn("/usr/local/bin/pool-job-guard", user_data)
+        self.assertEqual(posts[0]["labels"], {"pool": "priv"})
+
+    def test_a_one_job_pool_without_repos_creates_nothing(self):
+        error, posts = self.make(one_job=True, repos=())
+        self.assertIn("REPOS", error)
+        self.assertEqual(posts, [])
+
+    def test_a_shared_server_gets_no_guard(self):
+        error, posts = self.make(one_job=False, repos=(), events=())
+        self.assertIsNone(error)
+        user_data = posts[0]["user_data"]
+        self.assertIn("export ONE_JOB='0'", user_data)
+        self.assertNotIn("cat > /usr/local/bin/pool-job-guard", user_data)
+        self.assertNotIn("export EVENTS=", user_data)
+
+    def test_a_pull_request_run_is_never_counted_for_a_one_job_pool(self):
+        class P(pool.Pool):
+            def __init__(self):
+                self.pool, self.org, self.events = "priv", "org", ["schedule", "workflow_dispatch"]
+                self.repos = ["repo"]
+
+            def gh(self, path, method="GET", body=None):
+                if "/actions/runs?" in path:
+                    if "status=queued" not in path:
+                        return {"workflow_runs": []}
+                    return {"workflow_runs": [{"id": 1, "event": "pull_request"},
+                                              {"id": 2, "event": "schedule"}]}
+                return {"jobs": [{"status": "queued", "labels": ["self-hosted", "priv"]}]}
+
+        self.assertEqual(P().queued_jobs(), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
