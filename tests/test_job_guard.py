@@ -17,8 +17,10 @@ class JobGuard(unittest.TestCase):
         with open(self.env_file, "w") as f:
             f.write("ORG='org'\nEVENTS='schedule workflow_dispatch'\nALLOWED_REPOS='infra other'\n")
 
-    def start(self, event, repository, env_file=None):
+    def start(self, event, repository, env_file=None, ref="refs/heads/main"):
         env = {"PATH": os.environ["PATH"], "POOL_GUARD_ENV": env_file or self.env_file}
+        if ref is not None:
+            env["GITHUB_REF"] = ref
         if event is not None:
             env["GITHUB_EVENT_NAME"] = event
         if repository is not None:
@@ -51,6 +53,16 @@ class JobGuard(unittest.TestCase):
 
     def test_a_name_that_only_contains_a_listed_one_is_refused(self):
         self.assertNotEqual(self.start("schedule", "org/infra-fork").returncode, 0)
+
+    def test_a_manual_run_of_another_branch_is_refused(self):
+        result = self.start("workflow_dispatch", "org/infra", ref="refs/heads/edited")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("takes only runs of refs/heads/main", result.stderr)
+
+    def test_a_tag_a_pull_request_ref_or_no_ref_is_refused(self):
+        for ref in ("refs/tags/v1", "refs/pull/7/merge", "refs/heads/main-copy", "", None):
+            with self.subTest(ref=ref):
+                self.assertNotEqual(self.start("workflow_dispatch", "org/infra", ref=ref).returncode, 0)
 
     def test_without_its_lists_every_job_is_refused(self):
         result = self.start("schedule", "org/infra", env_file=os.path.join(self.dir, "missing"))

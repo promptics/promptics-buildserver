@@ -22,7 +22,7 @@
 #   promptics-pool        shared: a server takes many jobs of any repo while its billing hour lasts.
 #   promptics-privileged  one-job: each server takes exactly one job, then deletes itself, so a job
 #                         may be given what it must not share with other jobs, such as a privileged
-#                         container. Only scheduled and manually started runs of the listed repos get
+#                         container. Only scheduled and manually started runs of main in the listed repos get
 #                         one; its runner refuses every other job before the job's first step. It
 #                         boots from the shared pool's snapshot and has its own server limit, which
 #                         adds to the shared pool's.

@@ -14,7 +14,7 @@ jobs:
 
 A job that needs what it must not share with other jobs' servers, such as a privileged container,
 uses the one-job pool instead. Each of its servers takes exactly one job and deletes itself when
-that job ends. It serves only scheduled and manually started runs of the repositories listed in
+that job ends. It serves only scheduled and manually started runs, on the main branch, of the repositories listed in
 the `POOL_PRIVILEGED_REPOS` secret; its runner refuses every other job before the first step, so
 a pull request job never runs there.
 

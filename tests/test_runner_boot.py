@@ -146,6 +146,7 @@ class RunnerBoot(unittest.TestCase):
     def test_a_shared_pool_registers_reusable_runners_without_a_guard(self):
         self.boot()
         self.assertNotIn("--ephemeral", self.read(self.state, "config-args-1"))
+        self.assertNotIn("--disableupdate", self.read(self.state, "config-args-1"))
         self.assertNotIn("ACTIONS_RUNNER_HOOK_JOB_STARTED", self.read(self.dir, "actions-runner-1", ".env"))
         self.assertFalse(os.path.exists(os.path.join(self.etc, "pool-job-guard.env")))
         self.assertIn("ONE_JOB='0'", self.read(self.etc, "pool.env"))
@@ -154,6 +155,7 @@ class RunnerBoot(unittest.TestCase):
         self.one_job_boot()
         for i in (1, 2):
             self.assertIn("--ephemeral", self.read(self.state, f"config-args-{i}"))
+            self.assertIn("--disableupdate", self.read(self.state, f"config-args-{i}"))
         self.assertIn("ONE_JOB='1'", self.read(self.etc, "pool.env"))
 
     def test_a_one_job_runner_runs_the_guard_before_every_job(self):

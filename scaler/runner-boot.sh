@@ -46,7 +46,9 @@ umask 022
 # hook's lists are readable by the runner but writable only by root.
 ephemeral=""
 if [ "${ONE_JOB:-0}" = 1 ]; then
-  ephemeral="--ephemeral"
+  # --disableupdate: the runner never replaces its own binaries. GitHub serves such a runner
+  # for 30 days after a newer release; the weekly bake installs the latest one.
+  ephemeral="--ephemeral --disableupdate"
   cat > "$ETC/pool-job-guard.env" <<GUARD
 ORG='${ORG}'
 EVENTS='${EVENTS}'
