@@ -47,7 +47,8 @@ repositories, one after another, within its hour. A job that needs more than suc
 give any job, a privileged container for one, runs in a one-job pool instead: each server
 registers an ephemeral runner, which takes exactly one job, and the reaper deletes the server as
 soon as that job has ended, at any minute, since nothing is left to reuse. The pool serves only
-runs started by a schedule or by hand, on the main branch, of the repositories its configuration lists, in two
+runs on the main branch, started by a schedule, by hand, by a push to main or after another run on
+main, of the repositories its configuration lists, in two
 places: the scaler creates a server only for such a queued job, and the runner's job-started hook
 refuses any other job before its first step, because GitHub hands a queued job to any idle runner
 whose labels match. A pull request therefore never reaches it. The pool boots from the shared
