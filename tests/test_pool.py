@@ -285,15 +285,27 @@ class CreateWithSshKey(unittest.TestCase):
 class OneJobPool(unittest.TestCase):
     """A one-job pool serves only the events and repositories it lists; the shared pool is unchanged."""
 
-    EVENTS = ["schedule", "workflow_dispatch"]
+    EVENTS = ["schedule", "workflow_dispatch", "push", "workflow_run"]
 
     def test_a_pull_request_job_asks_for_no_one_job_server(self):
         self.assertFalse(pool.job_wanted("pull_request", ["self-hosted", "priv"], "priv", self.EVENTS))
-        self.assertFalse(pool.job_wanted("push", ["self-hosted", "priv"], "priv", self.EVENTS))
+        self.assertFalse(pool.job_wanted("pull_request_target", ["self-hosted", "priv"], "priv", self.EVENTS))
+        self.assertFalse(pool.job_wanted("issue_comment", ["self-hosted", "priv"], "priv", self.EVENTS))
 
     def test_a_scheduled_or_manual_job_asks_for_one(self):
         self.assertTrue(pool.job_wanted("schedule", ["self-hosted", "priv"], "priv", self.EVENTS))
         self.assertTrue(pool.job_wanted("workflow_dispatch", ["self-hosted", "priv"], "priv", self.EVENTS))
+        self.assertTrue(pool.job_wanted("push", ["self-hosted", "priv"], "priv", self.EVENTS))
+        self.assertTrue(pool.job_wanted("workflow_run", ["self-hosted", "priv"], "priv", self.EVENTS))
+
+    def test_the_privileged_pool_is_configured_with_exactly_these_events(self):
+        path = os.path.join(os.path.dirname(__file__), "..", ".github", "workflows", "pool-scale.yml")
+        with open(path) as f:
+            text = f.read()
+        entry = text[text.index("- pool: promptics-privileged"):]
+        line = next(l for l in entry.splitlines() if l.strip().startswith("events:"))
+        events = line.split(":", 1)[1].split("#", 1)[0].strip().strip('"').split()
+        self.assertEqual(sorted(events), sorted(self.EVENTS))
 
     def test_a_job_for_another_label_asks_for_nothing(self):
         self.assertFalse(pool.job_wanted("schedule", ["self-hosted", "promptics-pool"], "priv", self.EVENTS))
@@ -314,7 +326,7 @@ class OneJobPool(unittest.TestCase):
                 "REPOS": "a b", "IMAGE_POOL": "shared"}):
             p = pool.Pool()
         self.assertTrue(p.one_job)
-        self.assertEqual(p.events, self.EVENTS)
+        self.assertEqual(p.events, ["schedule", "workflow_dispatch"])
         self.assertEqual(p.repos, ["a", "b"])
         self.assertEqual(p.image_pool, "shared")
 

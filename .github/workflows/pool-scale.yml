@@ -13,8 +13,8 @@
 #   HCLOUD_TOKEN_CI   read/write token of the pool's own Hetzner Cloud project (it reaches nothing else)
 #   RUNNER_PAT        classic PAT with admin:org (org runner registration/removal)
 #                     and repo (reading the queued jobs of private repos)
-#   POOL_PRIVILEGED_REPOS  space-separated names of the repos whose scheduled and manually started
-#                     jobs may use the one-job pool promptics-privileged. A secret, not a variable, so
+#   POOL_PRIVILEGED_REPOS  space-separated names of the repos whose jobs on main may use the
+#                     one-job pool promptics-privileged. A secret, not a variable, so
 #                     the names stay out of this public repository's logs. Unset: that pool creates
 #                     nothing.
 #
@@ -22,8 +22,8 @@
 #   promptics-pool        shared: a server takes many jobs of any repo while its billing hour lasts.
 #   promptics-privileged  one-job: each server takes exactly one job, then deletes itself, so a job
 #                         may be given what it must not share with other jobs, such as a privileged
-#                         container. Only scheduled and manually started runs of main in the listed repos get
-#                         one; its runner refuses every other job before the job's first step. It
+#                         container. Only runs on main of the listed repos get one, started by a
+#                         schedule, by hand, by a push to main, or after another run on main; its runner refuses every other job before the job's first step. It
 #                         boots from the shared pool's snapshot and has its own server limit, which
 #                         adds to the shared pool's.
 name: pool scale
@@ -63,7 +63,7 @@ jobs:
           - pool: promptics-privileged
             org: promptics
             repos_secret: POOL_PRIVILEGED_REPOS   # the repos come from a secret, so they never appear in a log
-            events: "schedule workflow_dispatch"  # never pull_request or push
+            events: "schedule workflow_dispatch push workflow_run"  # never a pull request; the runner also requires main
             one_job: "1"
             image_pool: promptics-pool            # the shared pool's snapshot; no bake of its own
             candidates: "cx43:fsn1 cx43:nbg1 cx43:hel1 cpx42:fsn1 cpx42:nbg1 cpx42:hel1"
