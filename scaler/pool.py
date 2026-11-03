@@ -20,6 +20,13 @@ Every pool works the same way and runs this same file, configured by environment
   GH_TOKEN        classic PAT with admin:org (org runner registration and removal) and repo
                   (reading queued jobs of private repos)
   DRY_RUN         "1": decide and print, change nothing
+  IMAGE_POOL      whose baked snapshot servers boot from (default: POOL), so a pool can share another's
+  ONE_JOB         "1": a one-job pool. Each server registers an ephemeral runner that takes exactly one
+                  job, refuses any job outside EVENTS and REPOS before its first step (job-guard.sh),
+                  and deletes itself as soon as that job has ended. Such a pool needs REPOS and EVENTS,
+                  or it creates nothing
+  EVENTS          space-separated workflow run events whose jobs a one-job pool serves, e.g.
+                  "schedule workflow_dispatch"; queued jobs of other events create no server
 
 The rule. A server is billed per started hour from its own
 creation instant, running or powered off; only deletion stops the meter. So:
@@ -89,6 +96,26 @@ def may_reap(busy_states) -> bool:
     return all(state is False for state in busy_states)
 
 
+def job_wanted(run_event: str, job_labels, pool: str, events) -> bool:
+    """Whether a queued job asks for this pool's server. With EVENTS set, only jobs of runs started
+    by one of those events count, so a job of any other event never makes a server appear."""
+    if pool not in job_labels:
+        return False
+    return not events or run_event in events
+
+
+def one_job_config_error(one_job: bool, repos, events):
+    """Why a one-job pool may not create a server, or None. Its runner guards against jobs outside
+    an explicit list of repositories and events, so both lists must be set."""
+    if not one_job:
+        return None
+    if not repos:
+        return "ONE_JOB pool without REPOS: its runner would have no repository list to guard with. Nothing was created."
+    if not events:
+        return "ONE_JOB pool without EVENTS: its runner would have no event list to guard with. Nothing was created."
+    return None
+
+
 def stray_bake(created: dt.datetime, now: dt.datetime) -> bool:
     """A bake server outlives its workflow only when that workflow died before its cleanup step."""
     return (now - created).total_seconds() / 60 > BAKE_MAX_MIN
@@ -119,6 +146,9 @@ def env(name, default=None):
 
 
 class Pool:
+    # A shared pool unless the environment says otherwise.
+    repos, events, one_job, image_pool = [], [], False, None
+
     def __init__(self):
         self.pool = env("POOL")
         self.org = env("ORG")
@@ -130,6 +160,9 @@ class Pool:
         self.ssh_key = os.environ.get("HCLOUD_SSH_KEY", "")   # checked in create(): deleting never needs it
         self.gh_token = env("GH_TOKEN")
         self.dry = os.environ.get("DRY_RUN") == "1"
+        self.image_pool = os.environ.get("IMAGE_POOL") or self.pool
+        self.one_job = os.environ.get("ONE_JOB") == "1"
+        self.events = os.environ.get("EVENTS", "").split()
 
     # Hetzner
     def hc(self, path, method="GET", body=None):
@@ -157,7 +190,7 @@ class Pool:
 
     def image(self):
         """The newest snapshot baked for this pool, or None (then the server bakes at boot)."""
-        sel = urllib.parse.quote(f"pool-image={self.pool}")
+        sel = urllib.parse.quote(f"pool-image={self.image_pool or self.pool}")
         images = self.hc(f"/images?type=snapshot&label_selector={sel}&sort=created:desc")["images"]
         return images[0]["id"] if images else None
 
@@ -198,9 +231,12 @@ class Pool:
                                  f"the PAT's `repo` scope as well as admin:org.")
                     raise
                 for run in runs.get("workflow_runs", []):
+                    if self.events and run.get("event") not in self.events:
+                        continue
                     jobs = self.gh(f"/repos/{self.org}/{repo}/actions/runs/{run['id']}/jobs?per_page=100")
                     count += sum(1 for j in jobs.get("jobs", [])
-                                 if j["status"] == "queued" and self.pool in j.get("labels", []))
+                                 if j["status"] == "queued"
+                                 and job_wanted(run.get("event", ""), j.get("labels", []), self.pool, self.events))
         return count
 
     # actions
@@ -209,7 +245,8 @@ class Pool:
         usable; the caller finishes its cleanup first and then fails with it."""
         if n <= 0:
             return None
-        error = self.ssh_key_error()
+        one_job, repos, events = self.one_job, self.repos, self.events
+        error = one_job_config_error(one_job, repos, events) or self.ssh_key_error()
         if error:
             print(error)
             return error
@@ -218,6 +255,7 @@ class Pool:
         boot = open(os.path.join(HERE, "runner-boot.sh")).read()
         bake = "" if image else open(os.path.join(HERE, "bake.sh")).read()
         reaper = open(os.path.join(HERE, "reaper.sh")).read()
+        guard = open(os.path.join(HERE, "job-guard.sh")).read()
         for i in range(n):
             name = f"{self.pool}-{now:%Y%m%d%H%M%S}-{i}"
             # Secrets travel as user data, never in the image. The Hetzner token reaches only
@@ -232,6 +270,14 @@ class Pool:
                 reaper,
                 "REAPER",
                 "chmod 755 /usr/local/bin/pool-reaper",
+                f"export ONE_JOB='{1 if one_job else 0}'",
+            ] + ([
+                f"export EVENTS='{' '.join(events)}' ALLOWED_REPOS='{' '.join(repos)}'",
+                "cat > /usr/local/bin/pool-job-guard <<'GUARD'",
+                guard,
+                "GUARD",
+                "chmod 755 /usr/local/bin/pool-job-guard",
+            ] if one_job else []) + [
                 bake,
                 boot,
             ])

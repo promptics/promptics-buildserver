@@ -87,7 +87,7 @@ class Reaper(unittest.TestCase):
         with open(path) as f:
             return f.read()
 
-    def run_at(self, minute):
+    def run_at(self, minute, **extra):
         env = {
             "PATH": self.bin + os.pathsep + os.environ["PATH"],
             "STATE": self.state,
@@ -95,6 +95,7 @@ class Reaper(unittest.TestCase):
             "REMOVE_FROM": "50", "REMOVE_UNTIL": "58", "HCLOUD_TOKEN": "t",
             "POOL_BORN_FILE": os.path.join(self.dir, "born"),
             "POOL_RUNNER_ROOT": self.dir,
+            **extra,
         }
         # kill is a shell builtin, which a stub on PATH cannot replace; a function can.
         script = f'kill() {{ "{self.bin}/kill" "$@"; }}; source "{REAPER}"'
@@ -187,6 +188,49 @@ class Reaper(unittest.TestCase):
         self.assertEqual(self.run_at(52).returncode, 1)
         self.assertIn("-CONT 101 102", self.read("kills"))
         self.assertIn("deleting server 4242 failed", self.read("log"))
+
+
+class OneJobReaper(Reaper):
+    """A one-job server goes as soon as its job has ended, at any minute."""
+
+    def job_ended(self):
+        # The ephemeral listeners have exited and no worker runs; a worker log shows a job ran.
+        self.write("procs", "")
+        self.worker_log(1, age_seconds=5)
+
+    def test_a_server_whose_job_ended_goes_at_once(self):
+        self.job_ended()
+        self.assertEqual(self.run_at(10, ONE_JOB="1").returncode, 0)
+        self.assertTrue(self.deleted())
+        self.assertIn("its one job has ended", self.read("log"))
+
+    def test_a_server_whose_job_still_runs_stays(self):
+        self.write("procs", self.worker(1))
+        self.worker_log(1, age_seconds=5)
+        self.run_at(10, ONE_JOB="1")
+        self.assertFalse(self.deleted())
+
+    def test_a_server_still_waiting_for_its_job_stays_until_its_hour_ends(self):
+        self.run_at(10, ONE_JOB="1")
+        self.assertFalse(self.deleted())
+        self.run_at(52, ONE_JOB="1")
+        self.assertTrue(self.deleted())
+
+    def test_a_listener_still_up_keeps_the_server(self):
+        self.worker_log(1, age_seconds=5)
+        self.run_at(10, ONE_JOB="1")
+        self.assertFalse(self.deleted())
+
+    def test_an_unreadable_process_table_keeps_the_server(self):
+        self.job_ended()
+        self.write("pgrep-fails", "")
+        self.run_at(10, ONE_JOB="1")
+        self.assertFalse(self.deleted())
+
+    def test_a_shared_server_never_goes_early(self):
+        self.job_ended()
+        self.run_at(10)
+        self.assertFalse(self.deleted())
 
 
 if __name__ == "__main__":

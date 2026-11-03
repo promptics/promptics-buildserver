@@ -1,7 +1,8 @@
 // The org webhook's receiver (Cloudflare Worker). GitHub sends one `workflow_job` event per job
 // in any promptics repo; for a queued job whose runs-on carries a pool label, this starts the
 // pool's scaler (pool-scale.yml) at once, which scans every org repo's queue. Repos need nothing
-// but `runs-on: [self-hosted, promptics-pool]`.
+// but `runs-on: [self-hosted, promptics-pool]` (or the one-job pool's label, for the repos and
+// events that pool serves).
 //
 // It also wakes one more workflow, a work controller, when an issue becomes ready
 // (labelled READY_LABEL) or a pull request is merged, so queued work starts without waiting for
@@ -12,7 +13,7 @@
 // token allowed to dispatch workflows (Actions: write) in this repository and, when configured,
 // in CONTROLLER_REPO; CONTROLLER_REPO and CONTROLLER_WORKFLOW (optional).
 
-const POOLS = ["promptics-pool"];
+const POOLS = ["promptics-pool", "promptics-privileged"];
 const READY_LABEL = "status:agent-ready";
 const SCALER = "https://api.github.com/repos/promptics/promptics-buildserver/actions/workflows/pool-scale.yml/dispatches";
 
