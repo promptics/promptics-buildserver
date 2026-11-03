@@ -139,7 +139,7 @@ class RunnerBoot(unittest.TestCase):
             return f.read()
 
     def one_job_boot(self):
-        result = self.boot(ONE_JOB="1", EVENTS="schedule workflow_dispatch", ALLOWED_REPOS="repo",
+        result = self.boot(ONE_JOB="1", EVENTS="schedule workflow_dispatch push workflow_run", ALLOWED_REPOS="repo",
                            POOL_GUARD_BIN="/guard")
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -164,7 +164,7 @@ class RunnerBoot(unittest.TestCase):
             self.assertIn("ACTIONS_RUNNER_HOOK_JOB_STARTED=/guard",
                           self.read(self.dir, f"actions-runner-{i}", ".env").splitlines())
         guard_env = self.read(self.etc, "pool-job-guard.env")
-        self.assertIn("EVENTS='schedule workflow_dispatch'", guard_env)
+        self.assertIn("EVENTS='schedule workflow_dispatch push workflow_run'", guard_env)
         self.assertIn("ALLOWED_REPOS='repo'", guard_env)
         self.assertIn("ORG='org'", guard_env)
 

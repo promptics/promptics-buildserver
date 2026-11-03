@@ -26,7 +26,8 @@ Every pool works the same way and runs this same file, configured by environment
                   and deletes itself as soon as that job has ended. Such a pool needs REPOS and EVENTS,
                   or it creates nothing
   EVENTS          space-separated workflow run events whose jobs a one-job pool serves, e.g.
-                  "schedule workflow_dispatch"; queued jobs of other events create no server
+                  "schedule workflow_dispatch push workflow_run"; queued jobs of other events create
+                  no server
 
 The rule. A server is billed per started hour from its own
 creation instant, running or powered off; only deletion stops the meter. So:

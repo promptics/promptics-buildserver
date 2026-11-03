@@ -3,6 +3,7 @@ variables the runner gives it, and checks which jobs it lets start."""
 import os
 import shutil
 import subprocess
+import json
 import tempfile
 import unittest
 
@@ -15,10 +16,21 @@ class JobGuard(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir)
         self.env_file = os.path.join(self.dir, "pool-job-guard.env")
         with open(self.env_file, "w") as f:
-            f.write("ORG='org'\nEVENTS='schedule workflow_dispatch'\nALLOWED_REPOS='infra other'\n")
+            f.write("ORG='org'\nEVENTS='schedule workflow_dispatch push workflow_run'\n"
+                    "ALLOWED_REPOS='infra other'\n")
 
-    def start(self, event, repository, env_file=None, ref="refs/heads/main"):
+    def payload(self, head_branch="main", head_repository="org/infra", raw=None):
+        path = os.path.join(self.dir, "event.json")
+        with open(path, "w") as f:
+            f.write(raw if raw is not None else json.dumps({"workflow_run": {
+                "head_branch": head_branch, "conclusion": "success",
+                "head_repository": {"full_name": head_repository}}}))
+        return path
+
+    def start(self, event, repository, env_file=None, ref="refs/heads/main", event_path=None):
         env = {"PATH": os.environ["PATH"], "POOL_GUARD_ENV": env_file or self.env_file}
+        if event_path is not None:
+            env["GITHUB_EVENT_PATH"] = event_path
         if ref is not None:
             env["GITHUB_REF"] = ref
         if event is not None:
@@ -38,8 +50,40 @@ class JobGuard(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("refusing a job of event 'pull_request'", result.stderr)
 
+    def test_a_push_to_main_starts(self):
+        self.assertEqual(self.start("push", "org/infra").returncode, 0)
+
+    def test_a_push_to_another_branch_or_a_tag_is_refused(self):
+        for ref in ("refs/heads/feature", "refs/tags/v1"):
+            with self.subTest(ref=ref):
+                self.assertNotEqual(self.start("push", "org/infra", ref=ref).returncode, 0)
+
+    def test_a_workflow_run_after_a_run_on_main_starts(self):
+        result = self.start("workflow_run", "org/infra", event_path=self.payload())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_workflow_run_after_a_run_on_another_branch_is_refused(self):
+        # GITHUB_REF is main for every workflow_run; only the payload names the triggering branch.
+        result = self.start("workflow_run", "org/infra", event_path=self.payload(head_branch="feature"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("after 'feature'", result.stderr)
+
+    def test_a_workflow_run_after_a_fork_run_named_main_is_refused(self):
+        result = self.start("workflow_run", "org/infra",
+                            event_path=self.payload(head_repository="fork/infra"))
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_a_workflow_run_whose_payload_cannot_be_read_is_refused(self):
+        for path in (None, os.path.join(self.dir, "missing.json"), self.payload(raw="{not json"),
+                     self.payload(raw='{"other": 1}')):
+            with self.subTest(path=path):
+                result = self.start("workflow_run", "org/infra", event_path=path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("cannot read the workflow_run payload", result.stderr)
+
     def test_every_other_event_is_refused(self):
-        for event in ("pull_request_target", "push", "workflow_run", "issue_comment", "", None):
+        for event in ("pull_request", "pull_request_target", "issue_comment", "workflow_call",
+                      "merge_group", "repository_dispatch", "", None):
             with self.subTest(event=event):
                 self.assertNotEqual(self.start(event, "org/infra").returncode, 0)
 
