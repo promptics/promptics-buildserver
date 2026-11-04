@@ -57,6 +57,9 @@ REMOVE_FROM, REMOVE_UNTIL = 50, 58          # minutes into the billing hour
 BOOT_GRACE_MIN = 15                         # a server younger than this may still be booting
 BAKE_MAX_MIN = 45                           # pool-bake.yml times out at 40; an older bake server lost its workflow
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Where a one-job server installs its job-started hook. The runner runs a hook only from a path
+# ending in .sh, .ps1 or .js and fails the job's set-up otherwise.
+GUARD_BIN = "/usr/local/bin/pool-job-guard.sh"
 
 
 # ---------------------------------------------------------------- pure decisions (tested)
@@ -274,10 +277,11 @@ class Pool:
                 f"export ONE_JOB='{1 if one_job else 0}'",
             ] + ([
                 f"export EVENTS='{' '.join(events)}' ALLOWED_REPOS='{' '.join(repos)}'",
-                "cat > /usr/local/bin/pool-job-guard <<'GUARD'",
+                f"export POOL_GUARD_BIN='{GUARD_BIN}'",
+                f"cat > {GUARD_BIN} <<'GUARD'",
                 guard,
                 "GUARD",
-                "chmod 755 /usr/local/bin/pool-job-guard",
+                f"chmod 755 {GUARD_BIN}",
             ] if one_job else []) + [
                 bake,
                 boot,

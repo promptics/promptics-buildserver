@@ -374,8 +374,13 @@ class OneJobPool(unittest.TestCase):
         user_data = posts[0]["user_data"]
         self.assertIn("export ONE_JOB='1'", user_data)
         self.assertIn("export EVENTS='schedule workflow_dispatch' ALLOWED_REPOS='repo'", user_data)
-        self.assertIn("/usr/local/bin/pool-job-guard", user_data)
+        self.assertIn(f"cat > {pool.GUARD_BIN} <<'GUARD'", user_data)
+        self.assertIn(f"export POOL_GUARD_BIN='{pool.GUARD_BIN}'", user_data)
         self.assertEqual(posts[0]["labels"], {"pool": "priv"})
+
+    def test_the_hook_path_is_one_the_runner_runs(self):
+        # The runner refuses a hook whose path does not end in .sh, .ps1 or .js.
+        self.assertTrue(pool.GUARD_BIN.endswith((".sh", ".ps1", ".js")), pool.GUARD_BIN)
 
     def test_a_one_job_pool_without_repos_creates_nothing(self):
         error, posts = self.make(one_job=True, repos=())
@@ -387,7 +392,7 @@ class OneJobPool(unittest.TestCase):
         self.assertIsNone(error)
         user_data = posts[0]["user_data"]
         self.assertIn("export ONE_JOB='0'", user_data)
-        self.assertNotIn("cat > /usr/local/bin/pool-job-guard", user_data)
+        self.assertNotIn(f"cat > {pool.GUARD_BIN}", user_data)
         self.assertNotIn("export EVENTS=", user_data)
 
     def test_a_pull_request_run_is_never_counted_for_a_one_job_pool(self):

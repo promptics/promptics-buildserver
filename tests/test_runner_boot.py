@@ -3,6 +3,7 @@ and svc.sh are stubs that append to one shared call log, so the tests see what r
 order."""
 import os
 import shutil
+import sys
 import subprocess
 import tempfile
 import textwrap
@@ -167,6 +168,23 @@ class RunnerBoot(unittest.TestCase):
         self.assertIn("EVENTS='schedule workflow_dispatch push workflow_run'", guard_env)
         self.assertIn("ALLOWED_REPOS='repo'", guard_env)
         self.assertIn("ORG='org'", guard_env)
+
+    def test_the_default_hook_path_is_one_the_runner_runs(self):
+        # Without POOL_GUARD_BIN, as on a server whose user data predates it.
+        result = self.boot(ONE_JOB="1", EVENTS="schedule", ALLOWED_REPOS="repo")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hooks = [l.split("=", 1)[1] for l in self.read(self.dir, "actions-runner-1", ".env").splitlines()
+                 if l.startswith("ACTIONS_RUNNER_HOOK_JOB_STARTED=")]
+        self.assertEqual(len(hooks), 1)
+        self.assertTrue(hooks[0].endswith((".sh", ".ps1", ".js")), hooks[0])
+
+    def test_boot_and_scaler_name_the_same_hook(self):
+        result = self.boot(ONE_JOB="1", EVENTS="schedule", ALLOWED_REPOS="repo")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sys.path.insert(0, os.path.join(os.path.dirname(BOOT)))
+        import pool
+        self.assertIn(f"ACTIONS_RUNNER_HOOK_JOB_STARTED={pool.GUARD_BIN}",
+                      self.read(self.dir, "actions-runner-1", ".env").splitlines())
 
     def test_the_guard_is_in_place_before_the_runner_starts(self):
         # The runner reads .env when its service starts; the svc.sh stub records what it holds then.
