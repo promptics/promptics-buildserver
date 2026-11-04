@@ -62,7 +62,8 @@ for i in $(seq 1 "$SLOTS"); do
     --name '${NAME}-${i}' --labels '${POOL},linux,x64' --work _work --unattended --replace ${ephemeral}"
   if [ "${ONE_JOB:-0}" = 1 ]; then
     # The runner reads .env in its directory at start; config.sh has written that file by now.
-    echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=${POOL_GUARD_BIN:-/usr/local/bin/pool-job-guard}" >> "$d/.env"
+    # The runner runs a hook only from a path ending in .sh, .ps1 or .js.
+    echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=${POOL_GUARD_BIN:-/usr/local/bin/pool-job-guard.sh}" >> "$d/.env"
   fi
   (cd "$d" && ./svc.sh install runner && ./svc.sh start)
 done
