@@ -58,9 +58,9 @@ BOOT_GRACE_MIN = 15                         # a server younger than this may sti
 BAKE_MAX_MIN = 45                           # pool-bake.yml times out at 40; an older bake server lost its workflow
 # Reading queued jobs. GitHub cancels a job that has been queued for 24 hours, but a re-run keeps
 # the old run's id and creation time, so a run older than that can still hold a queued job. Per
-# watched repo and reconcile: at most RUN_PAGES windowed run-list calls, one call per RERUN_STATUSES
-# entry, and one jobs call per active run, up to MAX_ACTIVE_RUNS:
-# RUN_PAGES + len(RERUN_STATUSES) + MAX_ACTIVE_RUNS = 55 GitHub calls at most.
+# watched repo and reconcile: at most RUN_PAGES windowed run-list calls, up to RUN_PAGES per RERUN_STATUSES
+# entry (GitHub lists by creation time, so a re-run sits at the tail), and one jobs call per active
+# run, up to MAX_ACTIVE_RUNS: RUN_PAGES * (1 + len(RERUN_STATUSES)) + MAX_ACTIVE_RUNS = 59 calls at most.
 RUN_WINDOW_H = 24
 RERUN_STATUSES = ("queued", "in_progress")  # unwindowed lists that catch re-runs of old runs
 RUN_PAGES = 3                               # of 100 runs each
@@ -274,7 +274,7 @@ class Pool:
         without a status filter, because that filter can leave out a run whose own status is
         queued; each run's own status decides. (2) The runs the status filter lists as queued or
         in progress, with no time window, because a re-run keeps its old run id and creation time
-        and so falls outside (1). Bounded: at most RUN_PAGES + len(RERUN_STATUSES) list calls and
+        and so falls outside (1). Bounded: at most RUN_PAGES * (1 + len(RERUN_STATUSES)) list calls and
         at most MAX_ACTIVE_RUNS runs."""
         since = (now - dt.timedelta(hours=RUN_WINDOW_H)).strftime("%Y-%m-%dT%H:%M:%SZ")
         listed, full = self.run_list(repo, f"created={urllib.parse.quote('>=' + since)}", RUN_PAGES)
@@ -282,7 +282,11 @@ class Pool:
             print(f"warning: {self.org}/{repo}: more than {RUN_PAGES * 100} runs in {RUN_WINDOW_H}h; "
                   f"older runs were not read")
         for status in RERUN_STATUSES:
-            listed += self.run_list(repo, f"status={status}", 1)[0]
+            more, full = self.run_list(repo, f"status={status}", RUN_PAGES)
+            listed += more
+            if full:
+                print(f"warning: {self.org}/{repo}: more than {RUN_PAGES * 100} {status} runs; "
+                      f"older ones were not read")
         seen, out = set(), []
         for r in listed:
             if r["id"] not in seen and run_active(r, self.events):

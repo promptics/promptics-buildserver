@@ -424,7 +424,9 @@ class FakeRunsPool(pool.Pool):
         if "/actions/runs?" in path:
             self.list_calls.append(path)
             if "status=" in path:
-                return {"workflow_runs": self.by_status.get(path.split("status=")[1].split("&")[0], [])}
+                pages = self.by_status.get(path.split("status=")[1].split("&")[0], [])
+                page = int(path.rsplit("page=", 1)[1])
+                return {"workflow_runs": pages[page - 1] if page <= len(pages) else []}
             page = int(path.rsplit("page=", 1)[1])
             return {"workflow_runs": self.pages[page - 1] if page <= len(self.pages) else []}
         run_id = int(path.split("/actions/runs/")[1].split("/")[0])
@@ -450,13 +452,13 @@ class QueuedJobs(unittest.TestCase):
     def test_a_rerun_of_a_run_older_than_the_window_is_counted(self):
         old = {"id": 77, "event": "push", "status": "queued", "created_at": "2026-10-01T10:00:00Z",
                "updated_at": "2026-10-13T17:50:00Z"}
-        p = FakeRunsPool(["push"], [[]], {77: [QUEUED_JOB]}, by_status={"queued": [old]})
+        p = FakeRunsPool(["push"], [[]], {77: [QUEUED_JOB]}, by_status={"queued": [[old]]})
         self.assertEqual(p.queued_jobs(T0), 1)
         self.assertEqual(p.jobs_read, [77])
 
     def test_a_run_in_both_sources_is_read_once(self):
         run = {"id": 5, "event": "push", "status": "queued"}
-        p = FakeRunsPool(["push"], [[run]], {5: [QUEUED_JOB]}, by_status={"queued": [run]})
+        p = FakeRunsPool(["push"], [[run]], {5: [QUEUED_JOB]}, by_status={"queued": [[run]]})
         self.assertEqual(p.queued_jobs(T0), 1)
         self.assertEqual(p.jobs_read, [5])
 
@@ -464,13 +466,21 @@ class QueuedJobs(unittest.TestCase):
         done = {"id": 1, "event": "push", "status": "completed"}
         pr = {"id": 2, "event": "pull_request", "status": "queued"}
         p = FakeRunsPool(["push"], [[]], {1: [QUEUED_JOB], 2: [QUEUED_JOB]},
-                         by_status={"queued": [done, pr]})
+                         by_status={"queued": [[done, pr]]})
         self.assertEqual(p.queued_jobs(T0), 0)
+
+    def test_a_rerun_on_a_later_page_of_the_status_list_is_found(self):
+        old = {"id": 7777, "event": "push", "status": "queued", "created_at": "2026-10-01T10:00:00Z",
+               "updated_at": "2026-10-13T17:50:00Z"}
+        p = FakeRunsPool([], [[]], {7777: [QUEUED_JOB]},
+                         by_status={"queued": [runs(100, status="queued"), runs(100, status="queued", start=100), [old]]})
+        p.queued_jobs(T0)
+        self.assertIn(7777, p.jobs_read)
 
     def test_list_calls_per_repo_stay_bounded(self):
         p = FakeRunsPool([], [runs(100, start=100 * k) for k in range(10)], {})
         p.queued_jobs(T0)
-        self.assertLessEqual(len(p.list_calls), pool.RUN_PAGES + len(pool.RERUN_STATUSES))
+        self.assertLessEqual(len(p.list_calls), pool.RUN_PAGES * (1 + len(pool.RERUN_STATUSES)))
 
     def test_the_list_is_bounded_to_the_last_day(self):
         p = FakeRunsPool([], [[]], {})
