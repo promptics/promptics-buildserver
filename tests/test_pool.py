@@ -456,6 +456,14 @@ class QueuedJobs(unittest.TestCase):
         self.assertEqual(p.queued_jobs(T0), 1)
         self.assertEqual(p.jobs_read, [77])
 
+    def test_an_in_progress_rerun_older_than_the_window_with_a_queued_job_is_counted(self):
+        old = {"id": 78, "event": "push", "status": "in_progress", "created_at": "2026-10-01T10:00:00Z",
+               "updated_at": "2026-10-13T17:50:00Z"}
+        jobs = [dict(QUEUED_JOB, id=1, status="completed"), QUEUED_JOB]
+        p = FakeRunsPool(["push"], [[]], {78: jobs}, by_status={"in_progress": [[old]]})
+        self.assertEqual(p.queued_jobs(T0), 1)
+        self.assertEqual(p.jobs_read, [78])
+
     def test_a_run_in_both_sources_is_read_once(self):
         run = {"id": 5, "event": "push", "status": "queued"}
         p = FakeRunsPool(["push"], [[run]], {5: [QUEUED_JOB]}, by_status={"queued": [[run]]})
