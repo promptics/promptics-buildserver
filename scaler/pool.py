@@ -56,6 +56,14 @@ GH = "https://api.github.com"
 REMOVE_FROM, REMOVE_UNTIL = 50, 58          # minutes into the billing hour
 BOOT_GRACE_MIN = 15                         # a server younger than this may still be booting
 BAKE_MAX_MIN = 45                           # pool-bake.yml times out at 40; an older bake server lost its workflow
+# Reading queued jobs. GitHub cancels a job that has been queued for 24 hours, so older runs hold
+# none. Per watched repo and reconcile, at most RUN_PAGES run-list calls plus one jobs call per
+# active run, up to MAX_ACTIVE_RUNS: RUN_PAGES + MAX_ACTIVE_RUNS GitHub calls at most.
+RUN_WINDOW_H = 24
+RUN_PAGES = 3                               # of 100 runs each
+MAX_ACTIVE_RUNS = 50
+ACTIVE_RUN_STATUSES = ("queued", "in_progress", "waiting", "pending", "requested")
+STALE_QUEUED_MIN = 30                       # a queued job older than this is named in a warning
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Where a one-job server installs its job-started hook. The runner runs a hook only from a path
 # ending in .sh, .ps1 or .js and fails the job's set-up otherwise.
@@ -106,6 +114,22 @@ def job_wanted(run_event: str, job_labels, pool: str, events) -> bool:
     if pool not in job_labels:
         return False
     return not events or run_event in events
+
+
+def run_active(run, events) -> bool:
+    """Whether a run may still hold a queued job: its own status is not completed, and with
+    EVENTS set its event is one of them."""
+    if run.get("status") not in ACTIVE_RUN_STATUSES:
+        return False
+    return not events or run.get("event") in events
+
+
+def stale_jobs(jobs, now: dt.datetime, minutes: int = STALE_QUEUED_MIN):
+    """The queued jobs that have waited longer than `minutes`, oldest first."""
+    def since(job):
+        return dt.datetime.fromisoformat(job["created_at"].replace("Z", "+00:00"))
+    old = [j for j in jobs if j.get("created_at") and (now - since(j)).total_seconds() / 60 > minutes]
+    return sorted(old, key=since)
 
 
 def one_job_config_error(one_job: bool, repos, events):
@@ -222,26 +246,54 @@ class Pool:
                 return out
             page += 1
 
-    def queued_jobs(self):
-        """Jobs waiting for this pool's label, across the watched repos."""
-        count = 0
+    def active_runs(self, repo, now):
+        """Runs of one repo that may still hold a queued job, newest first. The runs list is read
+        without its status filter, because that filter can leave out a run whose own status is
+        queued; each run's own status decides instead. Bounded: runs created in the last
+        RUN_WINDOW_H hours, at most RUN_PAGES pages of 100, and at most MAX_ACTIVE_RUNS runs."""
+        since = (now - dt.timedelta(hours=RUN_WINDOW_H)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        created_q = urllib.parse.quote(f">={since}")
+        out = []
+        for page in range(1, RUN_PAGES + 1):
+            try:
+                batch = self.gh(f"/repos/{self.org}/{repo}/actions/runs?created={created_q}"
+                                f"&per_page=100&page={page}")
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    sys.exit(f"{self.org}/{repo}: 404 reading its workflow runs. A private repo needs "
+                             f"the PAT's `repo` scope as well as admin:org.")
+                raise
+            runs = batch.get("workflow_runs", [])
+            out += [r for r in runs if run_active(r, self.events)]
+            if len(runs) < 100:
+                break
+        else:
+            print(f"warning: {self.org}/{repo}: more than {RUN_PAGES * 100} runs in {RUN_WINDOW_H}h; "
+                  f"older runs were not read")
+        if len(out) > MAX_ACTIVE_RUNS:
+            print(f"warning: {self.org}/{repo}: {len(out)} active runs; reading the jobs of the "
+                  f"newest {MAX_ACTIVE_RUNS} only")
+            out = out[:MAX_ACTIVE_RUNS]
+        return out
+
+    def waiting_jobs(self, now):
+        """Queued jobs that ask for this pool's label, across the watched repos, each as
+        {repo, run_id, job_id, name, created_at}."""
+        out = []
         for repo in self.watched_repos():
-            for status in ("queued", "in_progress"):
-                try:
-                    runs = self.gh(f"/repos/{self.org}/{repo}/actions/runs?status={status}&per_page=50")
-                except urllib.error.HTTPError as e:
-                    if e.code == 404:
-                        sys.exit(f"{self.org}/{repo}: 404 reading its workflow runs. A private repo needs "
-                                 f"the PAT's `repo` scope as well as admin:org.")
-                    raise
-                for run in runs.get("workflow_runs", []):
-                    if self.events and run.get("event") not in self.events:
-                        continue
-                    jobs = self.gh(f"/repos/{self.org}/{repo}/actions/runs/{run['id']}/jobs?per_page=100")
-                    count += sum(1 for j in jobs.get("jobs", [])
-                                 if j["status"] == "queued"
-                                 and job_wanted(run.get("event", ""), j.get("labels", []), self.pool, self.events))
-        return count
+            for run in self.active_runs(repo, now):
+                jobs = self.gh(f"/repos/{self.org}/{repo}/actions/runs/{run['id']}/jobs?per_page=100")
+                for j in jobs.get("jobs", []):
+                    if j.get("status") == "queued" and job_wanted(run.get("event", ""), j.get("labels", []),
+                                                                  self.pool, self.events):
+                        out.append({"repo": repo, "run_id": run["id"], "job_id": j.get("id"),
+                                    "name": j.get("name", ""),
+                                    "created_at": j.get("created_at") or run.get("created_at")})
+        return out
+
+    def queued_jobs(self, now=None):
+        """How many jobs wait for this pool's label, across the watched repos."""
+        return len(self.waiting_jobs(now or utcnow()))
 
     # actions
     def create(self, n, now):
@@ -355,7 +407,8 @@ class Pool:
         now = utcnow()
         servers = self.servers()
         runners = self.runners()
-        queued = self.queued_jobs()
+        waiting = self.waiting_jobs(now)
+        queued = len(waiting)
 
         def own(server):
             return [r for r in runners if r["name"].startswith(server["name"] + "-")]
@@ -369,6 +422,12 @@ class Pool:
 
         # reuse is GitHub's routing; create for what it cannot cover
         create_error = self.create(servers_to_create(queued, idle, booting, len(servers), self.max_servers, self.slots), now)
+
+        # a job that has waited this long was seen by earlier runs and still has no runner
+        for j in stale_jobs(waiting, now):
+            age = int((now - dt.datetime.fromisoformat(j["created_at"].replace("Z", "+00:00"))).total_seconds() // 60)
+            print(f"warning: job {j['job_id']} ({j['name']}) of {self.org}/{j['repo']} run {j['run_id']} "
+                  f"has been queued for {age} min and is still not served")
 
         # sweep what a reaper missed
         for s in servers:

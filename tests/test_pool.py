@@ -263,8 +263,9 @@ class CreateWithSshKey(unittest.TestCase):
             def runners(self):
                 return [{"id": 1, "name": "pool-1-1", "status": "offline", "busy": False}]
 
-            def queued_jobs(self):
-                return 3
+            def waiting_jobs(self, now):
+                return [{"repo": "r", "run_id": 1, "job_id": i, "name": "j", "created_at": None}
+                        for i in range(3)]
 
             def gh(self, path, method="GET", body=None):
                 calls.append((method, path))
@@ -396,21 +397,136 @@ class OneJobPool(unittest.TestCase):
         self.assertNotIn("export EVENTS=", user_data)
 
     def test_a_pull_request_run_is_never_counted_for_a_one_job_pool(self):
+        p = FakeRunsPool(["schedule", "workflow_dispatch"], [[
+            {"id": 1, "event": "pull_request", "status": "queued"},
+            {"id": 2, "event": "schedule", "status": "queued"},
+        ]], {1: [QUEUED_JOB], 2: [QUEUED_JOB]})
+        self.assertEqual(p.queued_jobs(T0), 1)
+        self.assertNotIn(1, p.jobs_read)
+
+
+QUEUED_JOB = {"id": 10, "name": "smoke", "status": "queued", "labels": ["self-hosted", "priv"],
+              "created_at": "2026-10-13T17:50:00Z"}
+
+
+class FakeRunsPool(pool.Pool):
+    """A Pool that answers the runs list from pages and each run's jobs from a table. Like GitHub
+    can, it answers the runs list's status filter with nothing, so only a reader that ignores the
+    filter finds the queued run."""
+
+    def __init__(self, events, pages, jobs, repos=("repo",)):
+        self.pool, self.org, self.events, self.repos = "priv", "org", list(events), list(repos)
+        self.pages, self.jobs = pages, jobs
+        self.list_calls, self.jobs_read = [], []
+
+    def gh(self, path, method="GET", body=None):
+        if "/actions/runs?" in path:
+            self.list_calls.append(path)
+            if "status=" in path:
+                return {"workflow_runs": []}
+            page = int(path.rsplit("page=", 1)[1])
+            return {"workflow_runs": self.pages[page - 1] if page <= len(self.pages) else []}
+        run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+        self.jobs_read.append(run_id)
+        return {"jobs": self.jobs.get(run_id, [])}
+
+
+def runs(n, status="completed", start=0):
+    return [{"id": start + i, "event": "push", "status": status} for i in range(n)]
+
+
+class QueuedJobs(unittest.TestCase):
+    def setUp(self):
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        self.out = quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
+
+    def test_a_queued_run_the_status_filter_leaves_out_is_still_counted(self):
+        p = FakeRunsPool(["push"], [[{"id": 5, "event": "push", "status": "queued"}]],
+                         {5: [QUEUED_JOB]})
+        self.assertEqual(p.queued_jobs(T0), 1)
+        self.assertFalse([c for c in p.list_calls if "status=" in c])
+
+    def test_the_list_is_bounded_to_the_last_day(self):
+        p = FakeRunsPool([], [[]], {})
+        p.queued_jobs(T0)
+        self.assertIn("created=%3E%3D2026-10-12T18%3A00%3A00Z", p.list_calls[0])
+
+    def test_every_active_status_counts_and_finished_runs_are_not_read(self):
+        page = [{"id": i, "event": "push", "status": s} for i, s in
+                enumerate(["queued", "in_progress", "waiting", "pending", "completed"])]
+        p = FakeRunsPool([], [page], {i: [QUEUED_JOB] for i in range(5)})
+        self.assertEqual(p.queued_jobs(T0), 4)
+        self.assertEqual(sorted(p.jobs_read), [0, 1, 2, 3])
+
+    def test_only_queued_jobs_for_this_label_count(self):
+        jobs = [QUEUED_JOB, dict(QUEUED_JOB, status="in_progress"),
+                dict(QUEUED_JOB, labels=["self-hosted", "other"])]
+        p = FakeRunsPool([], [[{"id": 1, "event": "push", "status": "in_progress"}]], {1: jobs})
+        self.assertEqual(p.queued_jobs(T0), 1)
+
+    def test_pages_are_followed_until_a_short_one(self):
+        p = FakeRunsPool([], [runs(100), runs(100, start=100), [{"id": 999, "event": "push", "status": "queued"}]],
+                         {999: [QUEUED_JOB]})
+        self.assertEqual(p.queued_jobs(T0), 1)
+        self.assertEqual(len(p.list_calls), 3)
+
+    def test_the_run_list_stops_at_its_page_cap(self):
+        p = FakeRunsPool([], [runs(100, start=100 * k) for k in range(pool.RUN_PAGES + 2)], {})
+        p.queued_jobs(T0)
+        self.assertEqual(len(p.list_calls), pool.RUN_PAGES)
+        self.assertIn("older runs were not read", self.out.getvalue())
+
+    def test_jobs_are_read_for_at_most_the_cap_of_active_runs(self):
+        p = FakeRunsPool([], [runs(pool.MAX_ACTIVE_RUNS + 10, status="queued")], {})
+        p.queued_jobs(T0)
+        self.assertEqual(len(p.jobs_read), pool.MAX_ACTIVE_RUNS)
+        self.assertEqual(p.jobs_read[0], 0)   # newest first, as GitHub lists them
+        self.assertIn("active runs", self.out.getvalue())
+
+    def test_each_watched_repo_is_read(self):
+        p = FakeRunsPool([], [[{"id": 1, "event": "push", "status": "queued"}]], {1: [QUEUED_JOB]},
+                         repos=("a", "b"))
+        self.assertEqual(p.queued_jobs(T0), 2)
+        self.assertEqual([c.split("/")[3] for c in p.list_calls], ["a", "b"])
+
+
+class StaleJobs(unittest.TestCase):
+    def job(self, minutes_ago):
+        created = (T0 - dt.timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"repo": "repo", "run_id": 1, "job_id": minutes_ago, "name": "smoke", "created_at": created}
+
+    def test_only_jobs_queued_longer_than_the_limit_are_stale(self):
+        stale = pool.stale_jobs([self.job(10), self.job(45), self.job(180), self.job(30)], T0)
+        self.assertEqual([j["job_id"] for j in stale], [180, 45])
+
+    def test_a_job_without_a_creation_time_is_not_stale(self):
+        self.assertEqual(pool.stale_jobs([dict(self.job(90), created_at=None)], T0), [])
+
+    def test_reconcile_names_a_job_it_still_cannot_serve(self):
+        job = self.job(180)
+
         class P(pool.Pool):
             def __init__(self):
-                self.pool, self.org, self.events = "priv", "org", ["schedule", "workflow_dispatch"]
-                self.repos = ["repo"]
+                self.pool, self.org, self.slots, self.dry = "priv", "org", 1, True
+                self.max_servers = 1
 
-            def gh(self, path, method="GET", body=None):
-                if "/actions/runs?" in path:
-                    if "status=queued" not in path:
-                        return {"workflow_runs": []}
-                    return {"workflow_runs": [{"id": 1, "event": "pull_request"},
-                                              {"id": 2, "event": "schedule"}]}
-                return {"jobs": [{"status": "queued", "labels": ["self-hosted", "priv"]}]}
+            def servers(self):
+                return [{"id": 7, "name": "priv-1", "created": "2026-10-13T17:55:00Z"}]
 
-        self.assertEqual(P().queued_jobs(), 1)
+            def bake_servers(self):
+                return []
 
+            def runners(self):
+                return []
+
+            def waiting_jobs(self, now):
+                return [job]
+
+        out = io.StringIO()
+        with unittest.mock.patch.object(pool, "utcnow", lambda: T0), contextlib.redirect_stdout(out):
+            P().reconcile()
+        self.assertIn("warning: job 180 (smoke) of org/repo run 1 has been queued for 180 min", out.getvalue())
 
 if __name__ == "__main__":
     unittest.main()
