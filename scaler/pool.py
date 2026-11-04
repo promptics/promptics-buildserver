@@ -56,10 +56,13 @@ GH = "https://api.github.com"
 REMOVE_FROM, REMOVE_UNTIL = 50, 58          # minutes into the billing hour
 BOOT_GRACE_MIN = 15                         # a server younger than this may still be booting
 BAKE_MAX_MIN = 45                           # pool-bake.yml times out at 40; an older bake server lost its workflow
-# Reading queued jobs. GitHub cancels a job that has been queued for 24 hours, so older runs hold
-# none. Per watched repo and reconcile, at most RUN_PAGES run-list calls plus one jobs call per
-# active run, up to MAX_ACTIVE_RUNS: RUN_PAGES + MAX_ACTIVE_RUNS GitHub calls at most.
+# Reading queued jobs. GitHub cancels a job that has been queued for 24 hours, but a re-run keeps
+# the old run's id and creation time, so a run older than that can still hold a queued job. Per
+# watched repo and reconcile: at most RUN_PAGES windowed run-list calls, one call per RERUN_STATUSES
+# entry, and one jobs call per active run, up to MAX_ACTIVE_RUNS:
+# RUN_PAGES + len(RERUN_STATUSES) + MAX_ACTIVE_RUNS = 55 GitHub calls at most.
 RUN_WINDOW_H = 24
+RERUN_STATUSES = ("queued", "in_progress")  # unwindowed lists that catch re-runs of old runs
 RUN_PAGES = 3                               # of 100 runs each
 MAX_ACTIVE_RUNS = 50
 ACTIVE_RUN_STATUSES = ("queued", "in_progress", "waiting", "pending", "requested")
@@ -246,30 +249,46 @@ class Pool:
                 return out
             page += 1
 
-    def active_runs(self, repo, now):
-        """Runs of one repo that may still hold a queued job, newest first. The runs list is read
-        without its status filter, because that filter can leave out a run whose own status is
-        queued; each run's own status decides instead. Bounded: runs created in the last
-        RUN_WINDOW_H hours, at most RUN_PAGES pages of 100, and at most MAX_ACTIVE_RUNS runs."""
-        since = (now - dt.timedelta(hours=RUN_WINDOW_H)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        created_q = urllib.parse.quote(f">={since}")
-        out = []
-        for page in range(1, RUN_PAGES + 1):
+    def run_list(self, repo, query, pages):
+        """Up to `pages` pages of 100 workflow runs of one repo for a query string, newest first,
+        and whether the last page was full (more may exist)."""
+        out, full = [], False
+        for page in range(1, pages + 1):
             try:
-                batch = self.gh(f"/repos/{self.org}/{repo}/actions/runs?created={created_q}"
-                                f"&per_page=100&page={page}")
+                batch = self.gh(f"/repos/{self.org}/{repo}/actions/runs?{query}&per_page=100&page={page}")
             except urllib.error.HTTPError as e:
                 if e.code == 404:
                     sys.exit(f"{self.org}/{repo}: 404 reading its workflow runs. A private repo needs "
                              f"the PAT's `repo` scope as well as admin:org.")
                 raise
             runs = batch.get("workflow_runs", [])
-            out += [r for r in runs if run_active(r, self.events)]
-            if len(runs) < 100:
+            out += runs
+            full = len(runs) == 100
+            if not full:
                 break
-        else:
+        return out, full
+
+    def active_runs(self, repo, now):
+        """Runs of one repo that may still hold a queued job, most recently updated first. Two
+        sources, joined by run id. (1) The runs created in the last RUN_WINDOW_H hours, read
+        without a status filter, because that filter can leave out a run whose own status is
+        queued; each run's own status decides. (2) The runs the status filter lists as queued or
+        in progress, with no time window, because a re-run keeps its old run id and creation time
+        and so falls outside (1). Bounded: at most RUN_PAGES + len(RERUN_STATUSES) list calls and
+        at most MAX_ACTIVE_RUNS runs."""
+        since = (now - dt.timedelta(hours=RUN_WINDOW_H)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        listed, full = self.run_list(repo, f"created={urllib.parse.quote('>=' + since)}", RUN_PAGES)
+        if full:
             print(f"warning: {self.org}/{repo}: more than {RUN_PAGES * 100} runs in {RUN_WINDOW_H}h; "
                   f"older runs were not read")
+        for status in RERUN_STATUSES:
+            listed += self.run_list(repo, f"status={status}", 1)[0]
+        seen, out = set(), []
+        for r in listed:
+            if r["id"] not in seen and run_active(r, self.events):
+                seen.add(r["id"])
+                out.append(r)
+        out.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or "", reverse=True)
         if len(out) > MAX_ACTIVE_RUNS:
             print(f"warning: {self.org}/{repo}: {len(out)} active runs; reading the jobs of the "
                   f"newest {MAX_ACTIVE_RUNS} only")
