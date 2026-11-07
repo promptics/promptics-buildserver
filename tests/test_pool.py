@@ -324,10 +324,15 @@ class EveryCandidateRefused(unittest.TestCase):
                 calls.append((method, path))
                 return {"token": "t", "busy": False}
 
+            refusal_code, refusal_body = "resource_limit_exceeded", None
+
             def hc(self, path, method="GET", body=None):
                 calls.append((method, path))
                 if method == "POST" and path == "/servers":
-                    raise refused()
+                    if self.refusal_body is not None:
+                        return_body = io.BytesIO(self.refusal_body)
+                        raise urllib.error.HTTPError("https://api.example/servers", 403, "Forbidden", {}, return_body)
+                    raise refused(self.refusal_code)
                 return {}
 
         return P()
@@ -340,6 +345,25 @@ class EveryCandidateRefused(unittest.TestCase):
         self.assertEqual(len(posts), 3, "each candidate is tried once for the first server, then creating stops")
         self.assertIn("warning:", out.getvalue())
         self.assertIn("resource_limit_exceeded", out.getvalue())
+
+    def test_a_refusal_that_is_not_about_capacity_fails_the_run_after_its_cleanup(self):
+        calls = []
+        p = self.make(calls, servers=[SERVER])
+        p.refusal_code = "invalid_input"
+        with contextlib.redirect_stdout(io.StringIO()):
+            with unittest.mock.patch.object(pool, "utcnow", lambda: at(52)):
+                with self.assertRaises(SystemExit) as cm:
+                    p.reconcile()
+        self.assertIn("invalid_input", str(cm.exception))
+        self.assertIn(("DELETE", "/servers/7"), calls)
+
+    def test_an_error_body_that_is_not_json_is_named_by_its_status(self):
+        calls = []
+        p = self.make(calls)
+        p.refusal_body = b"<html>bad gateway</html>"
+        with contextlib.redirect_stdout(io.StringIO()):
+            error = p.create(1, T0)
+        self.assertIn("403", error)
 
     def test_reconcile_still_cleans_up_and_does_not_fail(self):
         calls = []
