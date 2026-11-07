@@ -9,7 +9,9 @@ Every pool works the same way and runs this same file, configured by environment
   ORG             GitHub organisation the runners register with, e.g. promptics
   REPOS           space-separated repos to watch for queued jobs (default: every repo of ORG)
   CANDIDATES      server type and location pairs to try in order, e.g. "cx43:fsn1 cx43:nbg1 cpx42:fsn1";
-                  Hetzner often has no capacity for one type in one location, so a create walks the list
+                  Hetzner often has no capacity for one type in one location, so a create walks the list;
+                  when every pair refuses (e.g. the project's core limit), creating stops for that run
+                  with a warning and the sweep still runs
   MAX_SERVERS     upper bound on servers in the pool (default 2)
   SLOTS           runners per server (default 2)
   HCLOUD_TOKEN    read/write token of the pool's own Hetzner project
@@ -337,6 +339,7 @@ class Pool:
         guard = open(os.path.join(HERE, "job-guard.sh")).read()
         for i in range(n):
             name = f"{self.pool}-{now:%Y%m%d%H%M%S}-{i}"
+            refusals = []
             # Secrets travel as user data, never in the image. The Hetzner token reaches only
             # this pool's project, which is what makes a token on the server acceptable.
             user_data = "\n".join([
@@ -383,9 +386,15 @@ class Pool:
                     break
                 except urllib.error.HTTPError as e:
                     reason = json.loads(e.read() or b"{}").get("error", {}).get("code", e.code)
+                    refusals.append(f"{server_type}:{location} {reason}")
                     print(f"  {server_type} in {location}: {reason}; trying the next candidate")
             else:
-                sys.exit(f"no candidate could place {name}: {' '.join(':'.join(c) for c in self.candidates)}")
+                # Every candidate refused, most often because the project has reached its core
+                # or server limit, which no other type or location escapes. Creating stops for
+                # this run and the run goes on to its cleanup; the next run tries again.
+                print(f"warning: no candidate could place {name} ({'; '.join(refusals)}); "
+                      f"creating stops for this run, {n - i - 1} more server(s) not attempted")
+                return None
         return None
 
     def runner_busy(self, runner):
