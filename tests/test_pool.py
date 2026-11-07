@@ -65,6 +65,27 @@ class Remove(unittest.TestCase):
         self.assertTrue(pool.should_remove(T0, at(52), busy=False, queued=1, runners_online=0))
 
 
+class IdleWindow(unittest.TestCase):
+    """The sweep honours the reaper's pool-keep-until label."""
+
+    def test_a_kept_server_stays_until_its_label_passes(self):
+        later = int(at(52).timestamp()) + 60
+        self.assertFalse(pool.should_remove(T0, at(52), busy=False, queued=0, runners_online=1, keep_until=later))
+
+    def test_a_kept_server_whose_label_passed_goes(self):
+        earlier = int(at(52).timestamp()) - 60
+        self.assertTrue(pool.should_remove(T0, at(52), busy=False, queued=0, runners_online=1, keep_until=earlier))
+
+    def test_a_broken_server_goes_despite_its_label(self):
+        later = int(at(52).timestamp()) + 3600
+        self.assertTrue(pool.should_remove(T0, at(52), busy=False, queued=0, runners_online=0, keep_until=later))
+
+    def test_the_label_is_read_from_the_server(self):
+        self.assertEqual(pool.keep_until({"labels": {"pool": "p", "pool-keep-until": "123"}}), 123)
+        self.assertIsNone(pool.keep_until({"labels": {"pool": "p"}}))
+        self.assertIsNone(pool.keep_until({"labels": {"pool-keep-until": "soon"}}))
+
+
 class MayReap(unittest.TestCase):
     def test_every_runner_idle_goes(self):
         self.assertTrue(pool.may_reap([False, False]))

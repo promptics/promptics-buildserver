@@ -1,6 +1,6 @@
 # Registers SLOTS runners with the org under the pool's label and arms the reaper. Runs at
 # every boot of a pool server, from the user data pool.py writes (which exports ORG, POOL,
-# NAME, SLOTS, REG_TOKEN, HCLOUD_TOKEN, ONE_JOB and the removal window; a one-job pool also
+# NAME, SLOTS, REG_TOKEN, HCLOUD_TOKEN, ONE_JOB, the removal window and IDLE_KEEP_MIN; a one-job pool also
 # EVENTS and ALLOWED_REPOS).
 ETC=${POOL_ETC:-/etc}
 RUNNER_ROOT=${POOL_RUNNER_ROOT:-/opt}
@@ -39,6 +39,8 @@ HCLOUD_TOKEN='${HCLOUD_TOKEN}'
 REMOVE_FROM='${REMOVE_FROM}'
 REMOVE_UNTIL='${REMOVE_UNTIL}'
 ONE_JOB='${ONE_JOB:-0}'
+POOL='${POOL}'
+POOL_IDLE_KEEP_MIN='${IDLE_KEEP_MIN:-0}'
 ENV
 umask 022
 # A one-job pool: every runner is ephemeral (it takes one job, then GitHub removes it), and its

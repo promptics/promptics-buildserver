@@ -27,6 +27,9 @@ Every pool works the same way and runs this same file, configured by environment
                   job, refuses any job outside EVENTS and REPOS before its first step (job-guard.sh),
                   and deletes itself as soon as that job has ended. Such a pool needs REPOS and EVENTS,
                   or it creates nothing
+  IDLE_KEEP_MIN   minutes (default 0 = off): an idle server in its removal window stays for another
+                  billed hour while one of its runners ended a job within this many minutes; the
+                  reaper labels it pool-keep-until=<epoch> and the sweep honours the label
   EVENTS          space-separated workflow run events whose jobs a one-job pool serves, e.g.
                   "schedule workflow_dispatch push workflow_run"; queued jobs of other events create
                   no server
@@ -94,16 +97,31 @@ def servers_to_create(queued: int, idle_slots: int, booting_slots: int,
 
 
 def should_remove(created: dt.datetime, now: dt.datetime, busy: bool, queued: int,
-                  runners_online: int) -> bool:
+                  runners_online: int, keep_until: int | None = None) -> bool:
     """The sweep's rule, the same as the reaper's: idle, nothing waiting, end of its hour.
-    A server with no runner online past the boot grace is broken and goes at the same point."""
+    A server with no runner online past the boot grace is broken and goes at the same point.
+    A server its reaper labelled pool-keep-until (the idle window) stays until that time,
+    unless it is broken; once the time passes, a dead reaper's server goes as before."""
     if busy:
         return False
     if not in_removal_window(created, now):
         return False
     age_min = (now - created).total_seconds() / 60
     broken = runners_online == 0 and age_min > BOOT_GRACE_MIN
-    return queued == 0 or broken
+    if broken:
+        return True
+    if keep_until is not None and now.timestamp() < keep_until:
+        return False
+    return queued == 0
+
+
+def keep_until(server) -> int | None:
+    """The idle window's end its reaper labelled on the server, or None."""
+    value = (server.get("labels") or {}).get("pool-keep-until")
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
 
 
 def may_reap(busy_states) -> bool:
@@ -180,7 +198,7 @@ def env(name, default=None):
 
 class Pool:
     # A shared pool unless the environment says otherwise.
-    repos, events, one_job, image_pool = [], [], False, None
+    repos, events, one_job, image_pool, idle_keep_min = [], [], False, None, 0
 
     def __init__(self):
         self.pool = env("POOL")
@@ -195,6 +213,7 @@ class Pool:
         self.dry = os.environ.get("DRY_RUN") == "1"
         self.image_pool = os.environ.get("IMAGE_POOL") or self.pool
         self.one_job = os.environ.get("ONE_JOB") == "1"
+        self.idle_keep_min = int(env("IDLE_KEEP_MIN", "0") or "0")
         self.events = os.environ.get("EVENTS", "").split()
 
     # Hetzner
@@ -352,7 +371,7 @@ class Pool:
                 reaper,
                 "REAPER",
                 "chmod 755 /usr/local/bin/pool-reaper",
-                f"export ONE_JOB='{1 if one_job else 0}'",
+                f"export ONE_JOB='{1 if one_job else 0}' IDLE_KEEP_MIN='{self.idle_keep_min}'",
             ] + ([
                 f"export EVENTS='{' '.join(events)}' ALLOWED_REPOS='{' '.join(repos)}'",
                 f"export POOL_GUARD_BIN='{GUARD_BIN}'",
@@ -472,7 +491,7 @@ class Pool:
             mine = own(s)
             busy = any(r["busy"] for r in mine)
             online = sum(1 for r in mine if r["status"] == "online")
-            if should_remove(created(s), now, busy, queued, online):
+            if should_remove(created(s), now, busy, queued, online, keep_until(s)):
                 self.remove(s, mine)
 
         # bake servers whose workflow died before deleting them
