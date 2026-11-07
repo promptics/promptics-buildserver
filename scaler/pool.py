@@ -9,7 +9,9 @@ Every pool works the same way and runs this same file, configured by environment
   ORG             GitHub organisation the runners register with, e.g. promptics
   REPOS           space-separated repos to watch for queued jobs (default: every repo of ORG)
   CANDIDATES      server type and location pairs to try in order, e.g. "cx43:fsn1 cx43:nbg1 cpx42:fsn1";
-                  Hetzner often has no capacity for one type in one location, so a create walks the list
+                  Hetzner often has no capacity for one type in one location, so a create walks the list;
+                  when every pair refuses for capacity or a project limit, creating stops for that run
+                  with a warning; any other refusal fails the run, in both cases after the sweep
   MAX_SERVERS     upper bound on servers in the pool (default 2)
   SLOTS           runners per server (default 2)
   HCLOUD_TOKEN    read/write token of the pool's own Hetzner project
@@ -337,6 +339,7 @@ class Pool:
         guard = open(os.path.join(HERE, "job-guard.sh")).read()
         for i in range(n):
             name = f"{self.pool}-{now:%Y%m%d%H%M%S}-{i}"
+            refusals = []
             # Secrets travel as user data, never in the image. The Hetzner token reaches only
             # this pool's project, which is what makes a token on the server acceptable.
             user_data = "\n".join([
@@ -382,10 +385,22 @@ class Pool:
                     self.hc("/servers", "POST", body)
                     break
                 except urllib.error.HTTPError as e:
-                    reason = json.loads(e.read() or b"{}").get("error", {}).get("code", e.code)
+                    reason = refusal_code(e)
+                    refusals.append((f"{server_type}:{location}", reason))
                     print(f"  {server_type} in {location}: {reason}; trying the next candidate")
             else:
-                sys.exit(f"no candidate could place {name}: {' '.join(':'.join(c) for c in self.candidates)}")
+                # Every candidate refused, most often because the project has reached its core
+                # or server limit, which no other type or location escapes. Creating stops for
+                # this run and the run goes on to its cleanup; the next run tries again.
+                named = "; ".join(f"{c} {r}" for c, r in refusals)
+                if all(r in CAPACITY_REFUSALS for _, r in refusals):
+                    print(f"warning: no candidate could place {name} ({named}); "
+                          f"creating stops for this run, {n - i - 1} more server(s) not attempted")
+                    return None
+                # A refusal that is not about capacity (bad input, a missing permission) will not
+                # pass by itself: the run fails, after its cleanup, like a missing SSH key.
+                print(f"no candidate could place {name} ({named})")
+                return f"no candidate could place {name}: {named}"
         return None
 
     def runner_busy(self, runner):
@@ -492,6 +507,20 @@ class Pool:
 
 def utcnow():
     return dt.datetime.now(dt.timezone.utc)
+
+
+# Hetzner error codes that mean "not now, not here": no capacity for a type in a location, or the
+# project at one of its limits. Any other refusal is a fault the run reports.
+CAPACITY_REFUSALS = {"resource_limit_exceeded", "resource_unavailable", "placement_error"}
+
+
+def refusal_code(error):
+    """The error code of a refused Hetzner call, or its HTTP status when the body is not the API's
+    JSON (a proxy's error page, an empty body)."""
+    try:
+        return json.loads(error.read() or b"{}").get("error", {}).get("code", error.code)
+    except (ValueError, AttributeError):
+        return error.code
 
 
 def created(server):

@@ -283,6 +283,96 @@ class CreateWithSshKey(unittest.TestCase):
         self.assertFalse([c for c in calls if c == ("POST", "/servers")])
 
 
+class EveryCandidateRefused(unittest.TestCase):
+    """A placement every candidate refuses, such as a project at its core limit, stops creating
+    for this run with a warning; it never ends the run before its cleanup."""
+
+    @staticmethod
+    def refused(code="resource_limit_exceeded"):
+        body = io.BytesIO(('{"error": {"code": "%s"}}' % code).encode())
+        return urllib.error.HTTPError("https://api.example/servers", 403, "Forbidden", {}, body)
+
+    def make(self, calls, servers=()):
+        refused = self.refused
+
+        class P(pool.Pool):
+            def __init__(self):
+                self.pool, self.org, self.slots, self.dry = "pool", "org", 1, False
+                self.max_servers, self.ssh_key, self.hc_token = 8, "ci-key", "token"
+                self.candidates = [("cx43", "fsn1"), ("cx43", "nbg1"), ("cpx42", "fsn1")]
+
+            def ssh_key_error(self):
+                return None
+
+            def image(self):
+                return 1
+
+            def servers(self):
+                return list(servers)
+
+            def bake_servers(self):
+                return []
+
+            def runners(self):
+                return [{"id": 1, "name": "pool-1-1", "status": "offline", "busy": False}]
+
+            def waiting_jobs(self, now):
+                return [{"repo": "r", "run_id": 1, "job_id": i, "name": "j", "created_at": None}
+                        for i in range(3)]
+
+            def gh(self, path, method="GET", body=None):
+                calls.append((method, path))
+                return {"token": "t", "busy": False}
+
+            refusal_code, refusal_body = "resource_limit_exceeded", None
+
+            def hc(self, path, method="GET", body=None):
+                calls.append((method, path))
+                if method == "POST" and path == "/servers":
+                    if self.refusal_body is not None:
+                        return_body = io.BytesIO(self.refusal_body)
+                        raise urllib.error.HTTPError("https://api.example/servers", 403, "Forbidden", {}, return_body)
+                    raise refused(self.refusal_code)
+                return {}
+
+        return P()
+
+    def test_create_stops_after_one_server_is_refused_everywhere_and_warns(self):
+        calls, out = [], io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(self.make(calls).create(3, T0))
+        posts = [c for c in calls if c == ("POST", "/servers")]
+        self.assertEqual(len(posts), 3, "each candidate is tried once for the first server, then creating stops")
+        self.assertIn("warning:", out.getvalue())
+        self.assertIn("resource_limit_exceeded", out.getvalue())
+
+    def test_a_refusal_that_is_not_about_capacity_fails_the_run_after_its_cleanup(self):
+        calls = []
+        p = self.make(calls, servers=[SERVER])
+        p.refusal_code = "invalid_input"
+        with contextlib.redirect_stdout(io.StringIO()):
+            with unittest.mock.patch.object(pool, "utcnow", lambda: at(52)):
+                with self.assertRaises(SystemExit) as cm:
+                    p.reconcile()
+        self.assertIn("invalid_input", str(cm.exception))
+        self.assertIn(("DELETE", "/servers/7"), calls)
+
+    def test_an_error_body_that_is_not_json_is_named_by_its_status(self):
+        calls = []
+        p = self.make(calls)
+        p.refusal_body = b"<html>bad gateway</html>"
+        with contextlib.redirect_stdout(io.StringIO()):
+            error = p.create(1, T0)
+        self.assertIn("403", error)
+
+    def test_reconcile_still_cleans_up_and_does_not_fail(self):
+        calls = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            with unittest.mock.patch.object(pool, "utcnow", lambda: at(52)):
+                self.make(calls, servers=[SERVER]).reconcile()
+        self.assertIn(("DELETE", "/servers/7"), calls)
+
+
 class OneJobPool(unittest.TestCase):
     """A one-job pool serves only the events and repositories it lists; the shared pool is unchanged."""
 
