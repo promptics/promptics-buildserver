@@ -31,9 +31,10 @@
 # kept for another billed hour while any of its runners ended a job within the last
 # POOL_IDLE_KEEP_MIN minutes, so a pipeline that pauses briefly finds a warm server instead of
 # waiting for a new one to boot. Billing is per started hour either way; the window only costs
-# the hours that end with no job. Each time it keeps the server it labels it pool-keep-until=<epoch>
-# so the controller's sweep (pool.py) does not delete it either; once that time passes, both
-# apply the plain rule above. A one-job server never uses the window.
+# the hours that end with no job. Each time it keeps the server it labels it pool-keep-until=<epoch>,
+# the end of the next hour's removal window, so the controller's sweep (pool.py) does not delete it
+# either; once that time passes, both apply the plain rule above. A one-job server never uses the
+# window.
 set -u
 BOOT_LAG=2
 QUIET_MIN=${POOL_QUIET_MIN:-3}
@@ -131,8 +132,9 @@ if [ "${ONE_JOB:-0}" != 1 ] && [ "$IDLE_KEEP_MIN" -gt 0 ]; then
   recent=$(find "$RUNNER_ROOT"/actions-runner-*/_diag -maxdepth 1 -name 'Worker_*.log' \
     -mmin "-$IDLE_KEEP_MIN" 2>/dev/null | head -n 1)
   if [ -n "$recent" ]; then
-    # Until the next decision at most: this reaper decides again in the next hour's window.
-    keep_until=$(( $(date +%s) + IDLE_KEEP_MIN * 60 ))
+    # Until the end of the next hour's removal window, plus a margin: this reaper decides again
+    # in that window, and if it cannot (dead, or its delete failed), the sweep takes over then.
+    keep_until=$(( $(date +%s) + ( 60 - minute + REMOVE_UNTIL + 2 ) * 60 ))
     log "minute $minute: idle, but a job ended within the last $IDLE_KEEP_MIN minutes: keeping server until $keep_until"
     mark_kept "$keep_until"
     exit 0
