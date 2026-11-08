@@ -190,6 +190,52 @@ class Reaper(unittest.TestCase):
         self.assertIn("deleting server 4242 failed", self.read("log"))
 
 
+class IdleWindowReaper(Reaper):
+    """POOL_IDLE_KEEP_MIN: an idle server stays for another billed hour while a job ended recently."""
+
+    def test_a_job_within_the_window_keeps_the_server_and_labels_it(self):
+        self.worker_log(2, age_seconds=30 * 60)
+        self.run_at(52, POOL_IDLE_KEEP_MIN="240", POOL="pool-x")
+        self.assertFalse(self.deleted())
+        self.assertEqual(self.read("kills"), "")          # kept before any listener is frozen
+        self.assertIn("-X PUT", self.read("curl"))
+        self.assertIn('"pool":"pool-x"', self.read("curl"))
+        # until the end of the next hour's removal window (minute 58) plus 2 minutes
+        self.assertIn('"pool-keep-until":"%d"' % (BORN + (52 - BOOT_LAG) * 60 + (60 - 52 + 58 + 2) * 60), self.read("curl"))
+        self.assertIn("/servers/4242", self.read("curl"))
+        self.assertIn("a job ended within the last 240 minutes: keeping server", self.read("log"))
+
+    def test_a_job_older_than_the_window_lets_the_server_go(self):
+        self.worker_log(2, age_seconds=250 * 60)
+        self.run_at(52, POOL_IDLE_KEEP_MIN="240", POOL="pool-x")
+        self.assertTrue(self.deleted())
+        self.assertNotIn("-X PUT", self.read("curl"))
+
+    def test_no_job_at_all_lets_the_server_go(self):
+        self.run_at(52, POOL_IDLE_KEEP_MIN="240", POOL="pool-x")
+        self.assertTrue(self.deleted())
+
+    def test_the_window_off_is_todays_rule(self):
+        self.worker_log(2, age_seconds=30 * 60)
+        self.run_at(52)
+        self.assertTrue(self.deleted())
+
+    def test_a_failed_label_still_keeps_the_server(self):
+        self.worker_log(2, age_seconds=30 * 60)
+        self.run_at(52, POOL_IDLE_KEEP_MIN="240")         # no POOL: the label cannot be written
+        self.assertFalse(self.deleted())
+        self.assertIn("POOL unknown: cannot label the server kept", self.read("log"))
+
+
+class OneJobIdleWindow(Reaper):
+    def test_a_one_job_server_never_uses_the_window(self):
+        self.worker_log(1, age_seconds=30 * 60)          # its job ended; no listener or worker left
+        self.write("procs", "")
+        self.run_at(20, ONE_JOB="1", POOL_IDLE_KEEP_MIN="240", POOL="pool-x")
+        self.assertTrue(self.deleted())
+        self.assertNotIn("-X PUT", self.read("curl"))
+
+
 class OneJobReaper(Reaper):
     """A one-job server goes as soon as its job has ended, at any minute."""
 

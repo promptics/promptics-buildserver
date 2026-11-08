@@ -65,6 +65,43 @@ class Remove(unittest.TestCase):
         self.assertTrue(pool.should_remove(T0, at(52), busy=False, queued=1, runners_online=0))
 
 
+class IdleWindow(unittest.TestCase):
+    """The sweep honours the reaper's pool-keep-until label."""
+
+    def test_a_kept_server_stays_until_its_label_passes(self):
+        later = int(at(52).timestamp()) + 60
+        self.assertFalse(pool.should_remove(T0, at(52), busy=False, queued=0, runners_online=1, keep_until=later))
+
+    def test_a_kept_server_whose_label_passed_goes(self):
+        earlier = int(at(52).timestamp()) - 60
+        self.assertTrue(pool.should_remove(T0, at(52), busy=False, queued=0, runners_online=1, keep_until=earlier))
+
+    def test_a_broken_server_goes_despite_its_label(self):
+        later = int(at(52).timestamp()) + 3600
+        self.assertTrue(pool.should_remove(T0, at(52), busy=False, queued=0, runners_online=0, keep_until=later))
+
+    def test_an_unlabelled_server_gets_a_few_minutes_for_its_reaper(self):
+        self.assertFalse(pool.should_remove(T0, at(51), busy=False, queued=0, runners_online=1, idle_keep_min=240))
+        self.assertTrue(pool.should_remove(T0, at(54), busy=False, queued=0, runners_online=1, idle_keep_min=240))
+
+    def test_without_the_window_the_sweep_is_unchanged(self):
+        self.assertTrue(pool.should_remove(T0, at(51), busy=False, queued=0, runners_online=1))
+
+    def test_an_empty_setting_is_off(self):
+        for value in ("", None):
+            with unittest.mock.patch.dict(os.environ, {} if value is None else {"IDLE_KEEP_MIN": value}, clear=False):
+                if value is None:
+                    os.environ.pop("IDLE_KEEP_MIN", None)
+                self.assertEqual(pool.idle_keep_min_from_env(), 0)
+        with unittest.mock.patch.dict(os.environ, {"IDLE_KEEP_MIN": "240"}):
+            self.assertEqual(pool.idle_keep_min_from_env(), 240)
+
+    def test_the_label_is_read_from_the_server(self):
+        self.assertEqual(pool.keep_until({"labels": {"pool": "p", "pool-keep-until": "123"}}), 123)
+        self.assertIsNone(pool.keep_until({"labels": {"pool": "p"}}))
+        self.assertIsNone(pool.keep_until({"labels": {"pool-keep-until": "soon"}}))
+
+
 class MayReap(unittest.TestCase):
     def test_every_runner_idle_goes(self):
         self.assertTrue(pool.may_reap([False, False]))
@@ -463,7 +500,7 @@ class OneJobPool(unittest.TestCase):
         error, posts = self.make(one_job=True)
         self.assertIsNone(error)
         user_data = posts[0]["user_data"]
-        self.assertIn("export ONE_JOB='1'", user_data)
+        self.assertIn("export ONE_JOB='1' IDLE_KEEP_MIN='0'", user_data)
         self.assertIn("export EVENTS='schedule workflow_dispatch' ALLOWED_REPOS='repo'", user_data)
         self.assertIn(f"cat > {pool.GUARD_BIN} <<'GUARD'", user_data)
         self.assertIn(f"export POOL_GUARD_BIN='{pool.GUARD_BIN}'", user_data)

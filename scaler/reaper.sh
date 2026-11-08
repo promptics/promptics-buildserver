@@ -26,9 +26,19 @@
 # when that job ends. Such a server is deleted as soon as a job has run on it and neither a
 # listener nor a worker is left, at any minute: nothing can take a job any more, and the server
 # exists for that one job only. Until it has had its job it follows the rule above.
+#
+# The idle window (POOL_IDLE_KEEP_MIN, default 0 = off): an idle server in its removal window is
+# kept for another billed hour while any of its runners ended a job within the last
+# POOL_IDLE_KEEP_MIN minutes, so a pipeline that pauses briefly finds a warm server instead of
+# waiting for a new one to boot. Billing is per started hour either way; the window only costs
+# the hours that end with no job. Each time it keeps the server it labels it pool-keep-until=<epoch>,
+# the end of the next hour's removal window, so the controller's sweep (pool.py) does not delete it
+# either; once that time passes, both apply the plain rule above. A one-job server never uses the
+# window.
 set -u
 BOOT_LAG=2
 QUIET_MIN=${POOL_QUIET_MIN:-3}
+IDLE_KEEP_MIN=${POOL_IDLE_KEEP_MIN:-0}
 BORN_FILE=${POOL_BORN_FILE:-/etc/pool-born}
 RUNNER_ROOT=${POOL_RUNNER_ROOT:-/opt}
 METADATA=${POOL_METADATA_URL:-http://169.254.169.254/hetzner/v1/metadata}
@@ -44,6 +54,17 @@ delete_server() {
     log "minute $minute: deleting server $id failed: keeping it"
     exit 1
   fi
+}
+
+# Labels the server pool-keep-until=<epoch> beside its pool label, so the controller's sweep
+# keeps it too. A failure only means the sweep may delete an idle server early: logged, not fatal.
+mark_kept() {
+  local id
+  if [ -z "${POOL:-}" ]; then log "minute $minute: POOL unknown: cannot label the server kept"; return 0; fi
+  id=$(curl -fsS "$METADATA/instance-id") || { log "minute $minute: cannot read the instance id to label it kept"; return 0; }
+  curl -fsS -X PUT -H "Authorization: Bearer ${HCLOUD_TOKEN}" -H "Content-Type: application/json" \
+    -d "{\"labels\":{\"pool\":\"${POOL}\",\"pool-keep-until\":\"$1\"}}" \
+    "$HCLOUD_API/servers/${id}" >/dev/null || log "minute $minute: labelling server $id kept failed"
 }
 
 # One-job pool: whether this server's job has run and nothing is left that could take another.
@@ -105,6 +126,20 @@ all_idle() {
 }
 
 all_idle check || { log "minute $minute: a runner is busy, ended a job moments ago, or its state is unknown: keeping server"; exit 0; }
+
+# The idle window: a job ended within the last IDLE_KEEP_MIN minutes, so work is likely to come.
+if [ "${ONE_JOB:-0}" != 1 ] && [ "$IDLE_KEEP_MIN" -gt 0 ]; then
+  recent=$(find "$RUNNER_ROOT"/actions-runner-*/_diag -maxdepth 1 -name 'Worker_*.log' \
+    -mmin "-$IDLE_KEEP_MIN" 2>/dev/null | head -n 1)
+  if [ -n "$recent" ]; then
+    # Until the end of the next hour's removal window, plus a margin: this reaper decides again
+    # in that window, and if it cannot (dead, or its delete failed), the sweep takes over then.
+    keep_until=$(( $(date +%s) + ( 60 - minute + REMOVE_UNTIL + 2 ) * 60 ))
+    log "minute $minute: idle, but a job ended within the last $IDLE_KEEP_MIN minutes: keeping server until $keep_until"
+    mark_kept "$keep_until"
+    exit 0
+  fi
+fi
 
 frozen=()
 thaw() { [ ${#frozen[@]} -eq 0 ] || kill -CONT "${frozen[@]}" 2>/dev/null; frozen=(); }

@@ -151,6 +151,13 @@ class RunnerBoot(unittest.TestCase):
         self.assertNotIn("ACTIONS_RUNNER_HOOK_JOB_STARTED", self.read(self.dir, "actions-runner-1", ".env"))
         self.assertFalse(os.path.exists(os.path.join(self.etc, "pool-job-guard.env")))
         self.assertIn("ONE_JOB='0'", self.read(self.etc, "pool.env"))
+        self.assertIn("POOL_IDLE_KEEP_MIN='0'", self.read(self.etc, "pool.env"))   # unset: off
+
+    def test_the_idle_window_and_pool_reach_the_reaper(self):
+        self.boot(IDLE_KEEP_MIN="240")
+        env = self.read(self.etc, "pool.env")
+        self.assertIn("POOL_IDLE_KEEP_MIN='240'", env)
+        self.assertRegex(env, r"(?m)^POOL='[^']+'$")
 
     def test_a_one_job_pool_registers_ephemeral_runners(self):
         self.one_job_boot()

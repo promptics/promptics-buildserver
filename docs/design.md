@@ -9,6 +9,15 @@ powered off; only deletion stops the meter. Every pool follows one rule:
   in a single location.
 - **Remove only when idle, and only in minutes 50–57 of the server's own billing hour.** An idle
   server earlier in its hour is already paid for and takes the next job for free.
+- **Optionally, keep an idle server warm** (`IDLE_KEEP_MIN`, off by default). In its removal window
+  an idle server stays for another billed hour while one of its runners ended a job within that
+  many minutes, so a short pause in the pipeline does not cost the next job a cold boot. The
+  reaper labels such a server `pool-keep-until` (the end of the next hour's removal window), and
+  the controller's sweep honours the label; a one-job pool never keeps a server. The sweep counts
+  minutes from the server's creation and the reaper from its boot, so with the window on the sweep
+  leaves an unlabelled server a few minutes into the window before it removes it. A sweep can still
+  occasionally remove a server its reaper was about to keep; no job is lost (the sweep rereads
+  whether it is busy and deregisters its runners first), only that server's warmth.
 
 **The server removes itself.** Scheduled workflows start minutes late and would miss that window,
 so `scaler/reaper.sh` runs every minute on the server. That puts a Hetzner token on the server,
