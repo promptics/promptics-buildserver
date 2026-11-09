@@ -26,6 +26,13 @@
 #                         schedule, by hand, by a push to main, or after another run on main; its runner refuses every other job before the job's first step. It
 #                         boots from the shared pool's snapshot and has its own server limit, which
 #                         adds to the shared pool's.
+#   promptics-pool-2slot  opt-in: like the shared pool, but a larger server may run two of its jobs
+#                         at once, so only a workflow whose jobs clean up nothing server-wide asks
+#                         for it. Boots from the shared pool's snapshot; its limit, counted in
+#                         slots, adds to the shared pool's. All three pools share one Hetzner
+#                         project, so its core and server limits are shared too: a full 2-slot pool
+#                         can make a shared-pool create hit them, which only warns, and that job
+#                         waits for a server to go.
 name: pool scale
 
 on:

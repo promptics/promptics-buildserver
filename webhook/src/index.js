@@ -13,7 +13,7 @@
 // token allowed to dispatch workflows (Actions: write) in this repository and, when configured,
 // in CONTROLLER_REPO; CONTROLLER_REPO and CONTROLLER_WORKFLOW (optional).
 
-const POOLS = ["promptics-pool", "promptics-privileged"];
+const POOLS = ["promptics-pool", "promptics-pool-2slot", "promptics-privileged"];   // every pool in pool-scale.yml (tests/test_pool.py)
 const READY_LABEL = "status:agent-ready";
 const SCALER = "https://api.github.com/repos/promptics/promptics-buildserver/actions/workflows/pool-scale.yml/dispatches";
 

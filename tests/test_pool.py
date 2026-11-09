@@ -2,6 +2,7 @@ import contextlib
 import datetime as dt
 import io
 import os
+import re
 import sys
 import unittest
 import unittest.mock
@@ -84,12 +85,25 @@ class Candidates(unittest.TestCase):
         two_slot = next(e for e in matrix if e["pool"] == "promptics-pool-2slot")
         self.assertEqual(two_slot.get("image_pool"), "promptics-pool")
 
+    def test_one_type_has_one_slot_count(self):
+        with self.assertRaises(SystemExit):
+            pool.parse_candidates("cx53:fsn1:2 cx53:nbg1:1", 1)
+
+    def test_every_pool_wakes_the_scaler_through_the_webhook(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "..", ".github", "workflows", "pool-scale.yml")) as f:
+            pools = {e["pool"] for e in yaml_matrix(f.read())}
+        with open(os.path.join(here, "..", "webhook", "src", "index.js")) as f:
+            line = next(l for l in f if l.startswith("const POOLS"))
+        listed = set(re.findall(r'"([^"]+)"', line.split("//")[0]))
+        self.assertEqual(pools, listed, "a pool missing from the webhook's POOLS waits for the cron backstop")
+
     def test_a_malformed_candidate_stops_the_controller(self):
         for bad in ("cx43", "cx43:fsn1:2:x", "cx43::2", "cx53:fsn1:0", "cx43:fsn1:x"):
             with self.assertRaises(SystemExit):
                 pool.parse_candidates(bad, 1)
 
-    def test_the_shared_pools_order_and_slots(self):
+    def test_the_opt_in_pools_order_and_slots(self):
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".github", "workflows", "pool-scale.yml")) as f:
             text = f.read()
         lines = [l for l in text.splitlines() if "candidates:" in l and "cx53" in l]
@@ -462,6 +476,37 @@ class SlotsPerType(unittest.TestCase):
         _, posts = self.run_create(1, refuse=("cx43",), one_job=True)
         self.assertEqual(posts[-1]["server_type"], "cx53")
         self.assertIn("SLOTS='1'", posts[-1]["user_data"])
+
+    def test_a_one_job_pools_server_counts_one_slot_whatever_its_type(self):
+        p, _ = self.make(one_job=True)
+        self.assertEqual(p.slots_of({"server_type": {"name": "cx53"}}), 1)
+
+    def test_no_room_creates_nothing(self):
+        _, posts = self.run_create(3, room=0)
+        self.assertEqual(posts, [])
+
+    def test_room_that_no_candidate_fits_creates_nothing_and_says_so(self):
+        p, posts = self.make()
+        p.candidates = pool.parse_candidates("cx53:fsn1:2", 1)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(p.create(1, T0, room=1))
+        self.assertEqual(posts, [])
+        self.assertIn("which no candidate fits", out.getvalue())
+
+    def test_a_young_2_slot_server_with_one_runner_online_still_books_its_second_slot(self):
+        servers = [dict(SERVER, server_type={"name": "cpx62"}, name="pool-a", id=11)]
+        p, posts = self.make(max_servers=8)
+        p.servers = lambda: servers
+        p.bake_servers = lambda: []
+        p.runners = lambda: [{"id": 1, "name": "pool-a-1", "status": "online", "busy": True}]
+        p.waiting_jobs = lambda now: [{"repo": "r", "run_id": 1, "job_id": 1, "name": "j", "created_at": None}]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with unittest.mock.patch.object(pool, "utcnow", lambda: T0 + dt.timedelta(minutes=2)):
+                p.reconcile()
+        self.assertIn("1 booting slot(s)", out.getvalue())
+        self.assertEqual(posts, [], "the one queued job waits for the second runner")
 
     def test_a_server_counts_its_types_slots(self):
         p, _ = self.make()

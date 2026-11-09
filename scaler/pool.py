@@ -114,6 +114,11 @@ def parse_candidates(text: str, default_slots: int):
         if slots < 1:
             sys.exit(f"CANDIDATES: '{c}' names fewer than one slot")
         out.append((parts[0], parts[1], slots))
+    for t in {c[0] for c in out}:
+        counts = {c[2] for c in out if c[0] == t}
+        if len(counts) > 1:
+            # A running server's slots are read from its type, so one type has one count.
+            sys.exit(f"CANDIDATES: {t} names different slot counts ({sorted(counts)}) in different locations")
     return out
 
 
@@ -544,9 +549,11 @@ class Pool:
             return [r for r in runners if r["name"].startswith(server["name"] + "-")]
 
         idle = sum(1 for r in runners if r["status"] == "online" and not r["busy"])
-        booting = sum(self.slots_of(s) for s in servers
-                      if not any(r["status"] == "online" for r in own(s))
-                      and (now - created(s)).total_seconds() / 60 <= BOOT_GRACE_MIN)
+        # A young server's slots whose runner is not online yet: on a 2-slot server the second
+        # runner can register a little after the first.
+        booting = sum(max(0, self.slots_of(s) - sum(1 for r in own(s) if r["status"] == "online"))
+                      for s in servers
+                      if (now - created(s)).total_seconds() / 60 <= BOOT_GRACE_MIN)
         print(f"pool {self.pool}: {len(servers)} server(s), {len(runners)} runner(s), "
               f"{idle} idle slot(s), {booting} booting slot(s), {queued} queued job(s)")
 

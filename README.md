@@ -59,7 +59,8 @@ jobs:
    root-password email. With it unset, or naming a missing key, the scaler creates nothing and
    fails after its cleanup has run, and the bake workflow fails.
 5. Run `pool bake` once; afterwards it runs weekly.
-6. Deploy the Worker (`cd webhook && npx wrangler@4 deploy`, secrets `WEBHOOK_SECRET` and
+6. Deploy the Worker (`cd webhook && npx wrangler@4 deploy`; again whenever a pool is added, since
+   its `POOLS` list decides which queued jobs wake the scaler, secrets `WEBHOOK_SECRET` and
    `DISPATCH_TOKEN` via `wrangler secret put`) and point an organisation webhook for
    `workflow_job` events at it.
 
