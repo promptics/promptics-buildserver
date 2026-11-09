@@ -45,11 +45,44 @@ class Create(unittest.TestCase):
         self.assertEqual(pool.unmet_slots(queued=0, idle_slots=0, booting_slots=0), 0)
 
 
+def yaml_matrix(text):
+    """The pool-scale matrix entries, read without a YAML library: `- pool:` starts an entry,
+    `key: value` lines (comments and quotes stripped) fill it."""
+    entries, cur, inside = [], None, False
+    for raw in text.splitlines():
+        line = raw.split(" #")[0].rstrip()
+        if line.strip() == "include:":
+            inside = True
+            continue
+        if not inside:
+            continue
+        if line.strip().startswith("steps:"):
+            break
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            cur = {}
+            entries.append(cur)
+            stripped = stripped[2:]
+        if cur is not None and ":" in stripped and not stripped.startswith("#"):
+            k, v = stripped.split(":", 1)
+            cur[k.strip()] = v.strip().strip('"')
+    return entries
+
+
 class Candidates(unittest.TestCase):
     """CANDIDATES names a slot count per type: type:location[:slots]."""
 
     def test_a_pair_without_slots_gets_the_pool_default(self):
         self.assertEqual(pool.parse_candidates("cx43:fsn1 cx53:nbg1:2", 1), [("cx43", "fsn1", 1), ("cx53", "nbg1", 2)])
+
+    def test_only_the_opt_in_pool_runs_two_jobs_on_a_server(self):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".github", "workflows", "pool-scale.yml")) as f:
+            matrix = yaml_matrix(f.read())
+        for entry in matrix:
+            two = [c for c in pool.parse_candidates(entry["candidates"], int(entry["slots"])) if c[2] > 1]
+            self.assertEqual(bool(two), entry["pool"] == "promptics-pool-2slot", entry["pool"])
+        two_slot = next(e for e in matrix if e["pool"] == "promptics-pool-2slot")
+        self.assertEqual(two_slot.get("image_pool"), "promptics-pool")
 
     def test_a_malformed_candidate_stops_the_controller(self):
         for bad in ("cx43", "cx43:fsn1:2:x", "cx43::2", "cx53:fsn1:0"):
@@ -59,7 +92,9 @@ class Candidates(unittest.TestCase):
     def test_the_shared_pools_order_and_slots(self):
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".github", "workflows", "pool-scale.yml")) as f:
             text = f.read()
-        line = next(l for l in text.splitlines() if "candidates:" in l and "cx53" in l)
+        lines = [l for l in text.splitlines() if "candidates:" in l and "cx53" in l]
+        self.assertEqual(1, len(lines), "only the opt-in pool has 2-slot candidates")
+        line = lines[0]
         parsed = pool.parse_candidates(line.split('"')[1], 1)
         order = []
         for t, _, slots in parsed:

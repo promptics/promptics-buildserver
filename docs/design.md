@@ -14,9 +14,11 @@ powered off; only deletion stops the meter. Every pool follows one rule:
   most the pool can run, and cost, stays bounded the same way. A create fills the unmet slots and
   skips a candidate with more slots than the maximum leaves room for. The warm cap counts
   servers: a 2-slot server kept warm is one of them. A one-job server always has one slot.
-  Two jobs on one server share its Docker daemon and home directory, so no workflow the pool
-  serves may clean up server-wide (all containers, the Gradle home, /tmp); each cleans up
-  only what it started, or what is older than its job's time limit.
+  Each runner slot has its own home and Gradle home (bake.sh), but two jobs on one server share
+  its Docker daemon, /tmp and host ports. So 2-slot candidates belong only in an opt-in pool
+  with a label of its own, which a workflow asks for once its jobs clean up nothing
+  server-wide (all containers, fixed ports, fixed /tmp paths): no job of another repository
+  can land beside it by accident.
 - **Remove only when idle, and only in minutes 50–57 of the server's own billing hour.** An idle
   server earlier in its hour is already paid for and takes the next job for free.
 - **Optionally, keep an idle server warm** (`IDLE_KEEP_MIN`, off by default). In its removal window
