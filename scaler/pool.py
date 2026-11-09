@@ -30,6 +30,8 @@ Every pool works the same way and runs this same file, configured by environment
   IDLE_KEEP_MIN   minutes (default 0 = off): an idle server in its removal window stays for another
                   billed hour while one of its runners ended a job within this many minutes; the
                   reaper labels it pool-keep-until=<epoch> and the sweep honours the label
+  IDLE_KEEP_MAX   servers (default 0 = no cap): at most this many servers of the pool are kept warm
+                  by IDLE_KEEP_MIN at once; the reaper counts the pool's live pool-keep-until labels
   EVENTS          space-separated workflow run events whose jobs a one-job pool serves, e.g.
                   "schedule workflow_dispatch push workflow_run"; queued jobs of other events create
                   no server
@@ -127,6 +129,11 @@ def idle_keep_min_from_env() -> int:
     return int(os.environ.get("IDLE_KEEP_MIN") or "0")
 
 
+def idle_keep_max_from_env() -> int:
+    """IDLE_KEEP_MAX, or 0 (no cap) when unset or empty, for the same reason."""
+    return int(os.environ.get("IDLE_KEEP_MAX") or "0")
+
+
 def keep_until(server) -> int | None:
     """The idle window's end its reaper labelled on the server, or None."""
     value = (server.get("labels") or {}).get("pool-keep-until")
@@ -210,7 +217,7 @@ def env(name, default=None):
 
 class Pool:
     # A shared pool unless the environment says otherwise.
-    repos, events, one_job, image_pool, idle_keep_min = [], [], False, None, 0
+    repos, events, one_job, image_pool, idle_keep_min, idle_keep_max = [], [], False, None, 0, 0
 
     def __init__(self):
         self.pool = env("POOL")
@@ -226,6 +233,7 @@ class Pool:
         self.image_pool = os.environ.get("IMAGE_POOL") or self.pool
         self.one_job = os.environ.get("ONE_JOB") == "1"
         self.idle_keep_min = idle_keep_min_from_env()
+        self.idle_keep_max = idle_keep_max_from_env()
         self.events = os.environ.get("EVENTS", "").split()
 
     # Hetzner
@@ -383,7 +391,7 @@ class Pool:
                 reaper,
                 "REAPER",
                 "chmod 755 /usr/local/bin/pool-reaper",
-                f"export ONE_JOB='{1 if one_job else 0}' IDLE_KEEP_MIN='{self.idle_keep_min}'",
+                f"export ONE_JOB='{1 if one_job else 0}' IDLE_KEEP_MIN='{self.idle_keep_min}' IDLE_KEEP_MAX='{self.idle_keep_max}'",
             ] + ([
                 f"export EVENTS='{' '.join(events)}' ALLOWED_REPOS='{' '.join(repos)}'",
                 f"export POOL_GUARD_BIN='{GUARD_BIN}'",

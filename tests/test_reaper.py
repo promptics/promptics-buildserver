@@ -1,5 +1,6 @@
 """Runs scaler/reaper.sh against a fake server: pgrep, kill, curl, logger and date are stubs that
 read and record files in a temporary directory, and the runner installs live there too."""
+import json
 import os
 import shutil
 import subprocess
@@ -33,10 +34,16 @@ STUBS = {
           mkdir -p "$d/_diag" && echo job > "$d/_diag/Worker_20261013-180000-utc.log"
         fi
     """,
+    # A server list (label_selector) prints $STATE/servers-<n> for the n-th list call, else
+    # $STATE/servers; $STATE/list-fails makes it fail.
     "curl": """
         echo "$*" >> "$STATE/curl"
         case "$*" in
           *instance-id*) echo 4242 ;;
+          *label_selector*)
+            [ -e "$STATE/list-fails" ] && exit 22
+            n=$(( $(cat "$STATE/lists" 2>/dev/null || echo 0) + 1 )); echo $n > "$STATE/lists"
+            if [ -e "$STATE/servers-$n" ]; then cat "$STATE/servers-$n"; else cat "$STATE/servers"; fi ;;
           *DELETE*) [ -e "$STATE/delete-fails" ] && exit 22 ;;
         esac
         exit 0
@@ -95,6 +102,7 @@ class Reaper(unittest.TestCase):
             "REMOVE_FROM": "50", "REMOVE_UNTIL": "58", "HCLOUD_TOKEN": "t",
             "POOL_BORN_FILE": os.path.join(self.dir, "born"),
             "POOL_RUNNER_ROOT": self.dir,
+            "POOL_KEPT_FILE": os.path.join(self.dir, "kept"),
             **extra,
         }
         # kill is a shell builtin, which a stub on PATH cannot replace; a function can.
@@ -225,6 +233,82 @@ class IdleWindowReaper(Reaper):
         self.run_at(52, POOL_IDLE_KEEP_MIN="240")         # no POOL: the label cannot be written
         self.assertFalse(self.deleted())
         self.assertIn("POOL unknown: cannot label the server kept", self.read("log"))
+
+
+class WarmCapReaper(Reaper):
+    """POOL_IDLE_KEEP_MAX: at most this many servers of the pool are kept warm at once."""
+
+    def now(self, minute=52):
+        return BORN + (minute - BOOT_LAG) * 60
+
+    def servers(self, *keep_untils, name="servers"):
+        # This server (4242) is listed too, with a live label, to prove it never counts itself.
+        servers = [{"id": 4242, "labels": {"pool": "pool-x", "pool-keep-until": str(self.now() + 9999)}}]
+        servers += [{"id": 10 + i, "labels": {"pool": "pool-x", "pool-keep-until": str(k)}}
+                    for i, k in enumerate(keep_untils)]
+        self.write(name, json.dumps({"servers": servers}))
+
+    def run_kept(self, **extra):
+        self.worker_log(2, age_seconds=30 * 60)
+        return self.run_at(52, POOL_IDLE_KEEP_MIN="60", POOL_IDLE_KEEP_MAX="2", POOL="pool-x", **extra)
+
+    def puts(self):
+        return [line for line in self.read("curl").splitlines() if "-X PUT" in line]
+
+    def test_under_the_cap_the_server_is_kept(self):
+        self.servers(self.now() + 600, self.now() - 60)      # one live label, one expired
+        self.run_kept()
+        self.assertFalse(self.deleted())
+        self.assertEqual(len(self.puts()), 1)
+        self.assertIn('"pool-keep-until"', self.puts()[0])
+        self.assertIn("label_selector=pool%3Dpool-x%2Cpool-keep-until", self.read("curl"))
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "kept")))
+
+    def test_at_the_cap_the_server_goes(self):
+        self.servers(self.now() + 600, self.now() + 1200)
+        self.run_kept()
+        self.assertTrue(self.deleted())
+        self.assertEqual(self.puts(), [])
+        self.assertIn("2 servers are already kept warm (cap 2): not keeping server", self.read("log"))
+
+    def test_a_reaper_that_kept_its_server_in_the_same_minute_makes_it_back_off(self):
+        self.servers(self.now() + 600, name="servers-1")
+        self.servers(self.now() + 600, self.now() + 700, name="servers-2")
+        self.run_kept()
+        self.assertTrue(self.deleted())
+        self.assertEqual(len(self.puts()), 2)
+        self.assertIn('"pool-keep-until"', self.puts()[0])
+        self.assertIn('{"labels":{"pool":"pool-x"}}', self.puts()[1])   # its own label removed
+        self.assertIn("backing off", self.read("log"))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "kept")))
+
+    def test_an_unreadable_count_keeps_nothing(self):
+        self.write("list-fails", "")
+        self.run_kept()
+        self.assertTrue(self.deleted())
+        self.assertEqual(self.puts(), [])
+        self.assertIn("cannot count the warm servers: not keeping server", self.read("log"))
+
+    def test_no_cap_lists_nothing(self):
+        self.worker_log(2, age_seconds=30 * 60)
+        self.run_at(52, POOL_IDLE_KEEP_MIN="60", POOL="pool-x")
+        self.assertFalse(self.deleted())
+        self.assertNotIn("label_selector", self.read("curl"))
+
+    def test_a_kept_server_that_takes_a_job_gives_its_place_back(self):
+        self.write("procs", self.worker(1), mode="a")
+        with open(os.path.join(self.dir, "kept"), "w") as f:
+            f.write("1")
+        self.run_at(20, POOL_IDLE_KEEP_MIN="60", POOL_IDLE_KEEP_MAX="2", POOL="pool-x")
+        self.assertEqual(len(self.puts()), 1)
+        self.assertIn('{"labels":{"pool":"pool-x"}}', self.puts()[0])
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "kept")))
+        self.assertIn("busy again: keep label removed", self.read("log"))
+
+    def test_a_busy_server_that_was_not_kept_changes_no_label(self):
+        self.write("procs", self.worker(1), mode="a")
+        self.run_at(20, POOL_IDLE_KEEP_MIN="60", POOL_IDLE_KEEP_MAX="2", POOL="pool-x")
+        self.assertEqual(self.puts(), [])
 
 
 class OneJobIdleWindow(Reaper):

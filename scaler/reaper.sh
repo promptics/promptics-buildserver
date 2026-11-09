@@ -35,10 +35,21 @@
 # the end of the next hour's removal window, so the controller's sweep (pool.py) does not delete it
 # either; once that time passes, both apply the plain rule above. A one-job server never uses the
 # window.
+#
+# The warm cap (POOL_IDLE_KEEP_MAX, default 0 = no cap): at most this many servers of the pool are
+# kept warm at once. Before keeping itself, the reaper counts the other servers of its pool whose
+# pool-keep-until label lies in the future; at the cap it does not keep the server and applies the
+# plain rule. Two reapers can decide in the same minute, so after labelling it counts again, and if
+# the pool is then over the cap it removes its own label and applies the plain rule. Both may back
+# off, which leaves fewer warm servers than the cap, never more. If the count cannot be read, the
+# server is not kept. A kept server that takes a job is no longer idle, so its reaper removes its
+# label at once (it remembers the label in POOL_KEPT_FILE), and the warm place goes to another server.
 set -u
 BOOT_LAG=2
 QUIET_MIN=${POOL_QUIET_MIN:-3}
 IDLE_KEEP_MIN=${POOL_IDLE_KEEP_MIN:-0}
+IDLE_KEEP_MAX=${POOL_IDLE_KEEP_MAX:-0}
+KEPT_FILE=${POOL_KEPT_FILE:-/run/pool-kept}
 BORN_FILE=${POOL_BORN_FILE:-/etc/pool-born}
 RUNNER_ROOT=${POOL_RUNNER_ROOT:-/opt}
 METADATA=${POOL_METADATA_URL:-http://169.254.169.254/hetzner/v1/metadata}
@@ -64,7 +75,33 @@ mark_kept() {
   id=$(curl -fsS "$METADATA/instance-id") || { log "minute $minute: cannot read the instance id to label it kept"; return 0; }
   curl -fsS -X PUT -H "Authorization: Bearer ${HCLOUD_TOKEN}" -H "Content-Type: application/json" \
     -d "{\"labels\":{\"pool\":\"${POOL}\",\"pool-keep-until\":\"$1\"}}" \
-    "$HCLOUD_API/servers/${id}" >/dev/null || log "minute $minute: labelling server $id kept failed"
+    "$HCLOUD_API/servers/${id}" >/dev/null || { log "minute $minute: labelling server $id kept failed"; return 1; }
+  echo "$1" > "$KEPT_FILE" 2>/dev/null || true
+}
+
+# Removes the pool-keep-until label (the labels become the pool label alone) and forgets it.
+unmark_kept() {
+  local id
+  id=$(curl -fsS "$METADATA/instance-id") || { log "minute $minute: cannot read the instance id to remove its keep label"; return 1; }
+  if curl -fsS -X PUT -H "Authorization: Bearer ${HCLOUD_TOKEN}" -H "Content-Type: application/json" \
+    -d "{\"labels\":{\"pool\":\"${POOL}\"}}" "$HCLOUD_API/servers/${id}" >/dev/null; then
+    rm -f "$KEPT_FILE"
+  else
+    log "minute $minute: removing the keep label of server $id failed"
+    return 1
+  fi
+}
+
+# Prints how many servers of this pool other than this one carry a pool-keep-until label that
+# lies in the future; fails when the list cannot be read.
+others_kept() {
+  local id body
+  id=$(curl -fsS "$METADATA/instance-id") || return 1
+  body=$(curl -fsS -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    "$HCLOUD_API/servers?label_selector=pool%3D${POOL}%2Cpool-keep-until&per_page=50") || return 1
+  jq -r --argjson me "$id" --argjson now "$(date +%s)" \
+    '[.servers[] | select(.id != $me) | select((.labels["pool-keep-until"] | tonumber? // 0) > $now)] | length' \
+    <<<"$body" 2>/dev/null
 }
 
 # One-job pool: whether this server's job has run and nothing is left that could take another.
@@ -83,6 +120,10 @@ minute=$(( ( ( $(date +%s) - born ) / 60 + BOOT_LAG ) % 60 ))
 if [ "${ONE_JOB:-0}" = 1 ] && one_job_done; then
   delete_server "its one job has ended"
   exit 0
+fi
+# A kept server that has taken a job gives its warm place back.
+if [ -e "$KEPT_FILE" ] && pgrep -f Runner.Worker >/dev/null; then
+  unmark_kept && log "minute $minute: busy again: keep label removed"
 fi
 [ "$minute" -ge "$REMOVE_FROM" ] && [ "$minute" -lt "$REMOVE_UNTIL" ] || exit 0
 
@@ -135,9 +176,28 @@ if [ "${ONE_JOB:-0}" != 1 ] && [ "$IDLE_KEEP_MIN" -gt 0 ]; then
     # Until the end of the next hour's removal window, plus a margin: this reaper decides again
     # in that window, and if it cannot (dead, or its delete failed), the sweep takes over then.
     keep_until=$(( $(date +%s) + ( 60 - minute + REMOVE_UNTIL + 2 ) * 60 ))
-    log "minute $minute: idle, but a job ended within the last $IDLE_KEEP_MIN minutes: keeping server until $keep_until"
-    mark_kept "$keep_until"
-    exit 0
+    keep=1
+    if [ "$IDLE_KEEP_MAX" -gt 0 ]; then
+      if [ -z "${POOL:-}" ]; then
+        log "minute $minute: POOL unknown: cannot count the warm servers: not keeping server"; keep=0
+      elif ! others=$(others_kept) || [ -z "$others" ]; then
+        log "minute $minute: cannot count the warm servers: not keeping server"; keep=0
+      elif [ "$others" -ge "$IDLE_KEEP_MAX" ]; then
+        log "minute $minute: idle, a job ended within the last $IDLE_KEEP_MIN minutes, but $others servers are already kept warm (cap $IDLE_KEEP_MAX): not keeping server"; keep=0
+      fi
+    fi
+    if [ "$keep" = 1 ]; then
+      log "minute $minute: idle, but a job ended within the last $IDLE_KEEP_MIN minutes: keeping server until $keep_until"
+      if mark_kept "$keep_until" && [ "$IDLE_KEEP_MAX" -gt 0 ]; then
+        # Another reaper may have kept its server in the same minute: recount, and back off if over.
+        if ! others=$(others_kept) || [ -z "$others" ] || [ "$others" -ge "$IDLE_KEEP_MAX" ]; then
+          log "minute $minute: over the cap of $IDLE_KEEP_MAX warm servers after labelling (others: ${others:-unknown}): backing off"
+          unmark_kept || exit 0
+          keep=0
+        fi
+      fi
+      [ "$keep" = 0 ] || exit 0
+    fi
   fi
 fi
 
