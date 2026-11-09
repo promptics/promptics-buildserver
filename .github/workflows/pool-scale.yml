@@ -26,9 +26,9 @@
 #                         schedule, by hand, by a push to main, or after another run on main; its runner refuses every other job before the job's first step. It
 #                         boots from the shared pool's snapshot and has its own server limit, which
 #                         adds to the shared pool's.
-#   promptics-pool-2slot  opt-in: like the shared pool, but a larger server may run two of its jobs
-#                         at once, so only a workflow whose jobs clean up nothing server-wide asks
-#                         for it. Boots from the shared pool's snapshot; its limit, counted in
+#   promptics-pool-2slot  opt-in: a pool of its own for the workflows that ask for it. Its servers
+#                         run one job each today; it was made for two per larger server, so only a
+#                         workflow whose jobs clean up nothing server-wide asks for it. Boots from the shared pool's snapshot; its limit, counted in
 #                         slots, adds to the shared pool's. All three pools share one Hetzner
 #                         project, so its core and server limits are shared too: a full 2-slot pool
 #                         can make a shared-pool create hit them, which only warns, and that job
@@ -77,11 +77,12 @@ jobs:
             org: promptics
             repos: ""
             image_pool: promptics-pool            # the shared pool's snapshot; no bake of its own
-            # type:location[:slots]. An 8-vCPU / 16 GB server runs one job; a 16-vCPU / 32 GB server
-            # runs two, each with what an 8-vCPU server gives one. When the cheapest type is sold
-            # out, a 2-slot server comes before the dear 1-slot type: one paid hour covers two jobs.
-            candidates: "cx43:fsn1 cx43:nbg1 cx43:hel1 cx53:fsn1:2 cx53:nbg1:2 cx53:hel1:2 cpx62:fsn1:2 cpx62:nbg1:2 cpx62:hel1:2 cpx42:fsn1 cpx42:nbg1 cpx42:hel1"
-            max_servers: 8   # counted in slots: a 2-slot server counts twice
+            # One job per server again. Two build jobs on one 16-vCPU server (shared vCPUs) each ran
+            # 1.4-1.8 times as long as alone, timing-sensitive tests failed about 25 times as often,
+            # and a job cost more, not less (see docs/design.md). The type:location:slots form stays
+            # for a type that really gives each of two jobs a full share.
+            candidates: "cx43:fsn1 cx43:nbg1 cx43:hel1 cpx42:fsn1 cpx42:nbg1 cpx42:hel1"
+            max_servers: 8   # counted in slots
             slots: 1
             idle_keep_min: 60
             idle_keep_max: 1
