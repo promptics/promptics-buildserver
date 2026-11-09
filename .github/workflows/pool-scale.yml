@@ -60,6 +60,7 @@ jobs:
             max_servers: 8   # One job per server (two builds on one 8-vCPU server ran past their time limit). A create the project's limits refuse stops creating for that run with a warning
             slots: 1
             idle_keep_min: 60    # keep an idle server for another billed hour while a job ended within the last hour (scaler/reaper.sh)
+            idle_keep_max: 2     # at most this many servers kept warm at once; further idle servers go as usual
             token: HCLOUD_TOKEN_CI
           - pool: promptics-privileged
             org: promptics
@@ -81,6 +82,7 @@ jobs:
           EVENTS: ${{ matrix.events }}
           ONE_JOB: ${{ matrix.one_job }}
           IDLE_KEEP_MIN: ${{ matrix.idle_keep_min }}
+          IDLE_KEEP_MAX: ${{ matrix.idle_keep_max }}
           IMAGE_POOL: ${{ matrix.image_pool }}
           CANDIDATES: ${{ matrix.candidates }}
           MAX_SERVERS: ${{ matrix.max_servers }}

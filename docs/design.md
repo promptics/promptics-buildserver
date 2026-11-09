@@ -18,6 +18,13 @@ powered off; only deletion stops the meter. Every pool follows one rule:
   leaves an unlabelled server a few minutes into the window before it removes it. A sweep can still
   occasionally remove a server its reaper was about to keep; no job is lost (the sweep rereads
   whether it is busy and deregisters its runners first), only that server's warmth.
+- **Optionally, cap how many servers are kept warm** (`IDLE_KEEP_MAX`, no cap by default). Before
+  keeping its server, the reaper counts the other servers of its pool whose `pool-keep-until` label
+  lies in the future, and at the cap it removes the server as usual. Two reapers can decide in the
+  same minute, so each counts again after labelling and backs off if the pool is over the cap: the
+  pool may briefly have fewer warm servers than the cap, never more. A count it cannot read keeps
+  nothing. A warm server that takes a job removes its label at once, so a busy server never holds
+  a warm place.
 
 **The server removes itself.** Scheduled workflows start minutes late and would miss that window,
 so `scaler/reaper.sh` runs every minute on the server. That puts a Hetzner token on the server,

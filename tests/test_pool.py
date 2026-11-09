@@ -96,6 +96,15 @@ class IdleWindow(unittest.TestCase):
         with unittest.mock.patch.dict(os.environ, {"IDLE_KEEP_MIN": "240"}):
             self.assertEqual(pool.idle_keep_min_from_env(), 240)
 
+    def test_an_empty_cap_is_no_cap(self):
+        for value in ("", None):
+            with unittest.mock.patch.dict(os.environ, {} if value is None else {"IDLE_KEEP_MAX": value}, clear=False):
+                if value is None:
+                    os.environ.pop("IDLE_KEEP_MAX", None)
+                self.assertEqual(pool.idle_keep_max_from_env(), 0)
+        with unittest.mock.patch.dict(os.environ, {"IDLE_KEEP_MAX": "2"}):
+            self.assertEqual(pool.idle_keep_max_from_env(), 2)
+
     def test_the_label_is_read_from_the_server(self):
         self.assertEqual(pool.keep_until({"labels": {"pool": "p", "pool-keep-until": "123"}}), 123)
         self.assertIsNone(pool.keep_until({"labels": {"pool": "p"}}))
@@ -500,7 +509,7 @@ class OneJobPool(unittest.TestCase):
         error, posts = self.make(one_job=True)
         self.assertIsNone(error)
         user_data = posts[0]["user_data"]
-        self.assertIn("export ONE_JOB='1' IDLE_KEEP_MIN='0'", user_data)
+        self.assertIn("export ONE_JOB='1' IDLE_KEEP_MIN='0' IDLE_KEEP_MAX='0'", user_data)
         self.assertIn("export EVENTS='schedule workflow_dispatch' ALLOWED_REPOS='repo'", user_data)
         self.assertIn(f"cat > {pool.GUARD_BIN} <<'GUARD'", user_data)
         self.assertIn(f"export POOL_GUARD_BIN='{pool.GUARD_BIN}'", user_data)
