@@ -7,6 +7,18 @@ powered off; only deletion stops the meter. Every pool follows one rule:
 - **Create only for unmet demand**, up to the pool's maximum, from the baked snapshot. A create
   walks a list of server type and location pairs, because a single type often has no capacity
   in a single location.
+- **A pair may name its own slot count** (`type:location:slots`). A larger type then runs that
+  many jobs at once, each with the share a smaller server gives one job, so when the cheapest
+  one-job type is sold out, one paid hour of a larger server covers two jobs and halves the
+  idle tail per job. The pool's maximum counts slots, so a 2-slot server counts twice and the
+  most the pool can run, and cost, stays bounded the same way. A create fills the unmet slots and
+  skips a candidate with more slots than the maximum leaves room for. The warm cap counts
+  servers: a 2-slot server kept warm is one of them. A one-job server always has one slot.
+  Each runner slot has its own home and Gradle home (bake.sh), but two jobs on one server share
+  its Docker daemon, /tmp and host ports. So 2-slot candidates belong only in an opt-in pool
+  with a label of its own, which a workflow asks for once its jobs clean up nothing
+  server-wide (all containers, fixed ports, fixed /tmp paths): no job of another repository
+  can land beside it by accident.
 - **Remove only when idle, and only in minutes 50–57 of the server's own billing hour.** An idle
   server earlier in its hour is already paid for and takes the next job for free.
 - **Optionally, keep an idle server warm** (`IDLE_KEEP_MIN`, off by default). In its removal window
@@ -22,7 +34,7 @@ powered off; only deletion stops the meter. Every pool follows one rule:
   keeping its server, the reaper counts the other servers of its pool whose `pool-keep-until` label
   lies in the future, and at the cap it removes the server as usual. Two reapers can decide in the
   same minute, so each counts again after labelling and backs off if the pool is over the cap: the
-  pool may briefly have fewer warm servers than the cap, never more. A count it cannot read keeps
+  pool may briefly have fewer warm servers than the cap, never more except in the two cases below. A count it cannot read keeps
   nothing. A warm server that takes a job removes its label at once, so a busy server never holds
   a warm place. If a backing-off server cannot remove its label, it is still removed by the plain
   rule; only if a job reaches it first does it keep the label, until that job makes it release it,

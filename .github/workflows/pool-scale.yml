@@ -26,6 +26,13 @@
 #                         schedule, by hand, by a push to main, or after another run on main; its runner refuses every other job before the job's first step. It
 #                         boots from the shared pool's snapshot and has its own server limit, which
 #                         adds to the shared pool's.
+#   promptics-pool-2slot  opt-in: like the shared pool, but a larger server may run two of its jobs
+#                         at once, so only a workflow whose jobs clean up nothing server-wide asks
+#                         for it. Boots from the shared pool's snapshot; its limit, counted in
+#                         slots, adds to the shared pool's. All three pools share one Hetzner
+#                         project, so its core and server limits are shared too: a full 2-slot pool
+#                         can make a shared-pool create hit them, which only warns, and that job
+#                         waits for a server to go.
 name: pool scale
 
 on:
@@ -57,10 +64,27 @@ jobs:
             org: promptics
             repos: ""        # every repo of the org: a run always scans them all, since concurrency keeps only the newest pending run
             candidates: "cx43:fsn1 cx43:nbg1 cx43:hel1 cpx42:fsn1 cpx42:nbg1 cpx42:hel1"
-            max_servers: 8   # One job per server (two builds on one 8-vCPU server ran past their time limit). A create the project's limits refuse stops creating for that run with a warning
+            max_servers: 3   # One job per server (two builds on one 8-vCPU server ran past their time limit). A create the project's limits refuse stops creating for that run with a warning
             slots: 1
             idle_keep_min: 60    # keep an idle server for another billed hour while a job ended within the last hour (scaler/reaper.sh)
-            idle_keep_max: 2     # at most this many servers kept warm at once; further idle servers go as usual
+            idle_keep_max: 1     # at most this many servers kept warm at once; further idle servers go as usual
+            token: HCLOUD_TOKEN_CI
+          # Opt-in pool for jobs that may share a server with another job of the same kind: a job
+          # asks for it by its label. It may run two jobs on one larger server, so only a workflow
+          # whose jobs clean up nothing server-wide (no removing every container, no fixed ports or
+          # /tmp paths) may use it. Same project, token and snapshot as the shared pool.
+          - pool: promptics-pool-2slot
+            org: promptics
+            repos: ""
+            image_pool: promptics-pool            # the shared pool's snapshot; no bake of its own
+            # type:location[:slots]. An 8-vCPU / 16 GB server runs one job; a 16-vCPU / 32 GB server
+            # runs two, each with what an 8-vCPU server gives one. When the cheapest type is sold
+            # out, a 2-slot server comes before the dear 1-slot type: one paid hour covers two jobs.
+            candidates: "cx43:fsn1 cx43:nbg1 cx43:hel1 cx53:fsn1:2 cx53:nbg1:2 cx53:hel1:2 cpx62:fsn1:2 cpx62:nbg1:2 cpx62:hel1:2 cpx42:fsn1 cpx42:nbg1 cpx42:hel1"
+            max_servers: 8   # counted in slots: a 2-slot server counts twice
+            slots: 1
+            idle_keep_min: 60
+            idle_keep_max: 1
             token: HCLOUD_TOKEN_CI
           - pool: promptics-privileged
             org: promptics
