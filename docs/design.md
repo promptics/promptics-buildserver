@@ -7,6 +7,16 @@ powered off; only deletion stops the meter. Every pool follows one rule:
 - **Create only for unmet demand**, up to the pool's maximum, from the baked snapshot. A create
   walks a list of server type and location pairs, because a single type often has no capacity
   in a single location.
+- **A pair may name its own slot count** (`type:location:slots`). A larger type then runs that
+  many jobs at once, each with the share a smaller server gives one job, so when the cheapest
+  one-job type is sold out, one paid hour of a larger server covers two jobs and halves the
+  idle tail per job. The pool's maximum counts slots, so a 2-slot server counts twice and the
+  most the pool can run, and cost, stays bounded the same way. A create fills the unmet slots and
+  skips a candidate with more slots than the maximum leaves room for. The warm cap counts
+  servers: a 2-slot server kept warm is one of them. A one-job server always has one slot.
+  Two jobs on one server share its Docker daemon and home directory, so no workflow the pool
+  serves may clean up server-wide (all containers, the Gradle home, /tmp); each cleans up
+  only what it started, or what is older than its job's time limit.
 - **Remove only when idle, and only in minutes 50–57 of the server's own billing hour.** An idle
   server earlier in its hour is already paid for and takes the next job for free.
 - **Optionally, keep an idle server warm** (`IDLE_KEEP_MIN`, off by default). In its removal window

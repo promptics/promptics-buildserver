@@ -56,8 +56,12 @@ jobs:
           - pool: promptics-pool
             org: promptics
             repos: ""        # every repo of the org: a run always scans them all, since concurrency keeps only the newest pending run
-            candidates: "cx43:fsn1 cx43:nbg1 cx43:hel1 cpx42:fsn1 cpx42:nbg1 cpx42:hel1"
-            max_servers: 8   # One job per server (two builds on one 8-vCPU server ran past their time limit). A create the project's limits refuse stops creating for that run with a warning
+            # type:location[:slots]. An 8-vCPU / 16 GB server runs one job (two builds on one ran past
+            # their time limit); a 16-vCPU / 32 GB server runs two, each with what an 8-vCPU server
+            # gives one. When the cheapest type is sold out, a 2-slot server of a cheap or then a
+            # dearer line comes before the dear 1-slot type: one paid hour covers two jobs.
+            candidates: "cx43:fsn1 cx43:nbg1 cx43:hel1 cx53:fsn1:2 cx53:nbg1:2 cx53:hel1:2 cpx62:fsn1:2 cpx62:nbg1:2 cpx62:hel1:2 cpx42:fsn1 cpx42:nbg1 cpx42:hel1"
+            max_servers: 8   # counted in slots: a 2-slot server counts twice. A create the project's limits refuse stops creating for that run with a warning
             slots: 1
             idle_keep_min: 60    # keep an idle server for another billed hour while a job ended within the last hour (scaler/reaper.sh)
             idle_keep_max: 2     # at most this many servers kept warm at once; further idle servers go as usual

@@ -33,19 +33,42 @@ class BillingHour(unittest.TestCase):
 
 class Create(unittest.TestCase):
     def test_idle_runners_are_reused_before_anything_is_created(self):
-        self.assertEqual(pool.servers_to_create(queued=2, idle_slots=2, booting_slots=0, servers=1, max_servers=3, slots=2), 0)
+        self.assertEqual(pool.unmet_slots(queued=2, idle_slots=2, booting_slots=0), 0)
 
     def test_booting_servers_count_as_capacity(self):
-        self.assertEqual(pool.servers_to_create(queued=2, idle_slots=0, booting_slots=2, servers=1, max_servers=3, slots=2), 0)
+        self.assertEqual(pool.unmet_slots(queued=2, idle_slots=0, booting_slots=2), 0)
 
-    def test_unmet_demand_creates_whole_servers(self):
-        self.assertEqual(pool.servers_to_create(queued=3, idle_slots=0, booting_slots=0, servers=0, max_servers=3, slots=2), 2)
-
-    def test_never_past_the_maximum(self):
-        self.assertEqual(pool.servers_to_create(queued=9, idle_slots=0, booting_slots=0, servers=2, max_servers=3, slots=2), 1)
+    def test_unmet_demand_is_counted_in_job_slots(self):
+        self.assertEqual(pool.unmet_slots(queued=3, idle_slots=1, booting_slots=0), 2)
 
     def test_nothing_queued_creates_nothing(self):
-        self.assertEqual(pool.servers_to_create(queued=0, idle_slots=0, booting_slots=0, servers=0, max_servers=3, slots=2), 0)
+        self.assertEqual(pool.unmet_slots(queued=0, idle_slots=0, booting_slots=0), 0)
+
+
+class Candidates(unittest.TestCase):
+    """CANDIDATES names a slot count per type: type:location[:slots]."""
+
+    def test_a_pair_without_slots_gets_the_pool_default(self):
+        self.assertEqual(pool.parse_candidates("cx43:fsn1 cx53:nbg1:2", 1), [("cx43", "fsn1", 1), ("cx53", "nbg1", 2)])
+
+    def test_a_malformed_candidate_stops_the_controller(self):
+        for bad in ("cx43", "cx43:fsn1:2:x", "cx43::2", "cx53:fsn1:0"):
+            with self.assertRaises(SystemExit):
+                pool.parse_candidates(bad, 1)
+
+    def test_the_shared_pools_order_and_slots(self):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".github", "workflows", "pool-scale.yml")) as f:
+            text = f.read()
+        line = next(l for l in text.splitlines() if "candidates:" in l and "cx53" in l)
+        parsed = pool.parse_candidates(line.split('"')[1], 1)
+        order = []
+        for t, _, slots in parsed:
+            if (t, slots) not in order:
+                order.append((t, slots))
+        self.assertEqual(order, [("cx43", 1), ("cx53", 2), ("cpx62", 2), ("cpx42", 1)])
+        self.assertEqual({loc for _, loc, _ in parsed}, {"fsn1", "nbg1", "hel1"})
+        self.assertEqual(len(parsed), 12, "each type in all three locations")
+
 
 
 class Remove(unittest.TestCase):
@@ -327,6 +350,107 @@ class CreateWithSshKey(unittest.TestCase):
         self.assertIn("HCLOUD_SSH_KEY", str(cm.exception))
         self.assertIn(("DELETE", "/servers/7"), calls)
         self.assertFalse([c for c in calls if c == ("POST", "/servers")])
+
+
+class SlotsPerType(unittest.TestCase):
+    """A 2-slot candidate registers two runners, counts twice against the maximum, and a refused
+    type falls back to the next candidate."""
+
+    def make(self, refuse=(), servers=(), max_servers=8, one_job=False):
+        posts = []
+
+        class P(pool.Pool):
+            def __init__(self):
+                self.pool, self.org, self.slots, self.dry = "pool", "org", 1, False
+                self.max_servers, self.ssh_key, self.hc_token = max_servers, "ci-key", "token"
+                self.one_job = one_job
+                self.repos, self.events = (["r"], ["push"]) if one_job else ([], [])
+                self.candidates = pool.parse_candidates(
+                    "cx43:fsn1 cx53:fsn1:2 cpx62:fsn1:2 cpx42:fsn1", 1)
+
+            def ssh_key_error(self):
+                return None
+
+            def image(self):
+                return 1
+
+            def gh(self, path, method="GET", body=None):
+                return {"token": "t"}
+
+            def hc(self, path, method="GET", body=None):
+                if method == "POST" and path == "/servers":
+                    posts.append(body)
+                    if body["server_type"] in refuse:
+                        raise EveryCandidateRefused.refused("resource_unavailable")
+                return {}
+
+        return P(), posts
+
+    @staticmethod
+    def placed(posts, refuse):
+        return [(p["server_type"], p["user_data"]) for p in posts if p["server_type"] not in refuse]
+
+    def run_create(self, n, room=None, **kw):
+        p, posts = self.make(**kw)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(p.create(n, T0, room=room))
+        return p, posts
+
+    def test_the_cheapest_type_comes_first_with_one_slot(self):
+        _, posts = self.run_create(1)
+        self.assertEqual([p["server_type"] for p in posts], ["cx43"])
+        self.assertIn("SLOTS='1'", posts[0]["user_data"])
+
+    def test_a_refused_type_falls_back_to_a_2_slot_server_that_registers_two_runners(self):
+        refuse = ("cx43",)
+        _, posts = self.run_create(2, refuse=refuse)
+        self.assertEqual([p["server_type"] for p in posts], ["cx43", "cx53"])
+        self.assertIn("SLOTS='2'", posts[-1]["user_data"])
+
+    def test_two_unmet_jobs_need_one_2_slot_server(self):
+        refuse = ("cx43", "cx53")
+        _, posts = self.run_create(2, refuse=refuse)
+        self.assertEqual([t for t, _ in self.placed(posts, refuse)], ["cpx62"])
+
+    def test_the_dear_1_slot_type_comes_last(self):
+        refuse = ("cx43", "cx53", "cpx62")
+        _, posts = self.run_create(1, refuse=refuse)
+        self.assertEqual([p["server_type"] for p in posts], ["cx43", "cx53", "cpx62", "cpx42"])
+        self.assertIn("SLOTS='1'", posts[-1]["user_data"])
+
+    def test_a_2_slot_candidate_is_skipped_when_the_maximum_leaves_one_slot(self):
+        refuse = ("cx43",)
+        _, posts = self.run_create(2, room=1, refuse=refuse)
+        self.assertEqual([p["server_type"] for p in posts], ["cx43", "cpx42"])
+
+    def test_a_one_job_server_has_one_slot_whatever_its_type(self):
+        _, posts = self.run_create(1, refuse=("cx43",), one_job=True)
+        self.assertEqual(posts[-1]["server_type"], "cx53")
+        self.assertIn("SLOTS='1'", posts[-1]["user_data"])
+
+    def test_a_server_counts_its_types_slots(self):
+        p, _ = self.make()
+        self.assertEqual(p.slots_of({"server_type": {"name": "cpx62"}}), 2)
+        self.assertEqual(p.slots_of({"server_type": {"name": "cpx42"}}), 1)
+        self.assertEqual(p.slots_of({"server_type": {"name": "ccx33"}}), 1, "a type no candidate names gets SLOTS")
+        self.assertEqual(p.slots_of({}), 1)
+
+    def test_reconcile_counts_a_2_slot_server_twice_against_the_maximum(self):
+        # Three booting 2-slot servers hold 6 of 7 slots; 7 queued jobs leave 1 unmet, and the one
+        # slot of room left fits only a 1-slot type: with cx43 sold out, cpx42, not a 2-slot cx53.
+        servers = [dict(SERVER, server_type={"name": "cpx62"}, name=f"pool-{i}", id=10 + i) for i in range(3)]
+        p, posts = self.make(max_servers=7, refuse=("cx43",))
+        p.servers = lambda: servers
+        p.bake_servers = lambda: []
+        p.runners = lambda: []
+        p.waiting_jobs = lambda now: [{"repo": "r", "run_id": 1, "job_id": i, "name": "j", "created_at": None}
+                                      for i in range(7)]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with unittest.mock.patch.object(pool, "utcnow", lambda: T0 + dt.timedelta(minutes=2)):
+                p.reconcile()
+        self.assertEqual([b["server_type"] for b in posts], ["cx43", "cpx42"])
+        self.assertIn("6 booting slot(s)", out.getvalue())
 
 
 class EveryCandidateRefused(unittest.TestCase):

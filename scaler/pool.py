@@ -9,11 +9,15 @@ Every pool works the same way and runs this same file, configured by environment
   ORG             GitHub organisation the runners register with, e.g. promptics
   REPOS           space-separated repos to watch for queued jobs (default: every repo of ORG)
   CANDIDATES      server type and location pairs to try in order, e.g. "cx43:fsn1 cx43:nbg1 cpx42:fsn1";
+                  a pair may name its own slot count as a third part, e.g. "cx53:fsn1:2", for a larger
+                  type that runs that many jobs at once; without it a server gets SLOTS.
                   Hetzner often has no capacity for one type in one location, so a create walks the list;
                   when every pair refuses for capacity or a project limit, creating stops for that run
                   with a warning; any other refusal fails the run, in both cases after the sweep
-  MAX_SERVERS     upper bound on servers in the pool (default 2)
-  SLOTS           runners per server (default 2)
+  MAX_SERVERS     upper bound on the pool's size, counted in slots: a server counts once per slot,
+                  so a 2-slot server counts twice (default 2). With one slot per server, as the
+                  shared pool had before slot counts per type, this is the number of servers
+  SLOTS           runners per server whose candidate names no slot count (default 2)
   HCLOUD_TOKEN    read/write token of the pool's own Hetzner project
   HCLOUD_SSH_KEY  name of an SSH key in the pool's Hetzner project; every server is created with it,
                   so Hetzner sends no root-password email. Required to create: with it unset, or naming
@@ -92,11 +96,27 @@ def in_removal_window(created: dt.datetime, now: dt.datetime) -> bool:
     return REMOVE_FROM <= minute_of_billing_hour(created, now) < REMOVE_UNTIL
 
 
-def servers_to_create(queued: int, idle_slots: int, booting_slots: int,
-                      servers: int, max_servers: int, slots: int) -> int:
-    """Servers to add so every queued job has a runner, never past the pool's maximum."""
-    unmet = max(0, queued - idle_slots - booting_slots)
-    return max(0, min(math.ceil(unmet / slots), max_servers - servers))
+def unmet_slots(queued: int, idle_slots: int, booting_slots: int) -> int:
+    """Queued jobs that no idle or booting runner will take."""
+    return max(0, queued - idle_slots - booting_slots)
+
+
+def parse_candidates(text: str, default_slots: int):
+    """CANDIDATES as (server type, location, slots); a pair without a third part gets default_slots."""
+    out = []
+    for c in text.split():
+        parts = c.split(":")
+        if len(parts) not in (2, 3) or not all(parts):
+            sys.exit(f"CANDIDATES: '{c}' is not type:location or type:location:slots")
+        slots = int(parts[2]) if len(parts) == 3 else default_slots
+        if slots < 1:
+            sys.exit(f"CANDIDATES: '{c}' names fewer than one slot")
+        out.append((parts[0], parts[1], slots))
+    return out
+
+
+def candidate_slots(candidate, default_slots: int) -> int:
+    return candidate[2] if len(candidate) > 2 else default_slots
 
 
 def should_remove(created: dt.datetime, now: dt.datetime, busy: bool, queued: int,
@@ -218,14 +238,15 @@ def env(name, default=None):
 class Pool:
     # A shared pool unless the environment says otherwise.
     repos, events, one_job, image_pool, idle_keep_min, idle_keep_max = [], [], False, None, 0, 0
+    candidates = []
 
     def __init__(self):
         self.pool = env("POOL")
         self.org = env("ORG")
         self.repos = os.environ.get("REPOS", "").split()
-        self.candidates = [tuple(c.split(":", 1)) for c in env("CANDIDATES").split()]
         self.max_servers = int(env("MAX_SERVERS", "2"))
         self.slots = int(env("SLOTS", "2"))
+        self.candidates = parse_candidates(env("CANDIDATES"), self.slots)
         self.hc_token = env("HCLOUD_TOKEN")
         self.ssh_key = os.environ.get("HCLOUD_SSH_KEY", "")   # checked in create(): deleting never needs it
         self.gh_token = env("GH_TOKEN")
@@ -235,6 +256,17 @@ class Pool:
         self.idle_keep_min = idle_keep_min_from_env()
         self.idle_keep_max = idle_keep_max_from_env()
         self.events = os.environ.get("EVENTS", "").split()
+
+    def slots_of(self, server) -> int:
+        """A server's slot count, from its type: the first candidate of that type names it.
+        A type no candidate names any more (the list changed while it ran) gets SLOTS."""
+        if self.one_job:
+            return 1
+        server_type = (server.get("server_type") or {}).get("name")
+        for c in self.candidates:
+            if c[0] == server_type:
+                return candidate_slots(c, self.slots)
+        return self.slots
 
     # Hetzner
     def hc(self, path, method="GET", body=None):
@@ -360,10 +392,13 @@ class Pool:
         return len(self.waiting_jobs(now or utcnow()))
 
     # actions
-    def create(self, n, now):
-        """Creates n servers. Returns an error message, creating nothing, when the SSH key is not
-        usable; the caller finishes its cleanup first and then fails with it."""
-        if n <= 0:
+    def create(self, n, now, room=None):
+        """Creates servers until n more job slots exist, never adding more than `room` slots (the
+        pool's maximum less what it has; None: no limit). A candidate with more slots
+        than the room left is skipped. Returns an error message, creating nothing, when the SSH
+        key is not usable; the caller finishes its cleanup first and then fails with it."""
+        room = math.inf if room is None else room
+        if n <= 0 or room <= 0:
             return None
         one_job, repos, events = self.one_job, self.repos, self.events
         error = one_job_config_error(one_job, repos, events) or self.ssh_key_error()
@@ -376,15 +411,69 @@ class Pool:
         bake = "" if image else open(os.path.join(HERE, "bake.sh")).read()
         reaper = open(os.path.join(HERE, "reaper.sh")).read()
         guard = open(os.path.join(HERE, "job-guard.sh")).read()
-        for i in range(n):
+        # A one-job server takes exactly one job, whatever its type.
+        candidates = [(c[0], c[1], 1 if one_job else candidate_slots(c, self.slots)) for c in self.candidates]
+        i = 0
+        while n > 0:
+            fitting = [c for c in candidates if c[2] <= room]
+            if not fitting:
+                print(f"the pool's maximum leaves room for {room} slot(s), which no candidate fits")
+                return None
             name = f"{self.pool}-{now:%Y%m%d%H%M%S}-{i}"
             refusals = []
-            # Secrets travel as user data, never in the image. The Hetzner token reaches only
-            # this pool's project, which is what makes a token on the server acceptable.
-            user_data = "\n".join([
+            placed = 0
+            for server_type, location, slots in fitting:
+                body = {
+                    "name": name,
+                    "server_type": server_type,
+                    "location": location,
+                    "image": image or "ubuntu-24.04",
+                    "user_data": self.user_data(name, slots, reg, reaper, guard, bake, boot),
+                    "ssh_keys": [self.ssh_key],
+                    "labels": {"pool": self.pool},
+                    "start_after_create": True,
+                    # IPv4 only: each primary IP counts against the account's limit, and nothing a
+                    # job reaches needs IPv6.
+                    "public_net": {"enable_ipv4": True, "enable_ipv6": False},
+                }
+                print(f"create {name} ({server_type}, {location}, {slots} slot(s), image {image or 'ubuntu-24.04 + bake'})")
+                if self.dry:
+                    placed = slots
+                    break
+                try:
+                    self.hc("/servers", "POST", body)
+                    placed = slots
+                    break
+                except urllib.error.HTTPError as e:
+                    reason = refusal_code(e)
+                    refusals.append((f"{server_type}:{location}", reason))
+                    print(f"  {server_type} in {location}: {reason}; trying the next candidate")
+            if not placed:
+                # Every candidate refused, most often because the project has reached its core
+                # or server limit, which no other type or location escapes. Creating stops for
+                # this run and the run goes on to its cleanup; the next run tries again.
+                named = "; ".join(f"{c} {r}" for c, r in refusals)
+                if all(r in CAPACITY_REFUSALS for _, r in refusals):
+                    print(f"warning: no candidate could place {name} ({named}); "
+                          f"creating stops for this run, {n} job slot(s) still unmet")
+                    return None
+                # A refusal that is not about capacity (bad input, a missing permission) will not
+                # pass by itself: the run fails, after its cleanup, like a missing SSH key.
+                print(f"no candidate could place {name} ({named})")
+                return f"no candidate could place {name}: {named}"
+            n -= placed
+            room -= placed
+            i += 1
+        return None
+
+    def user_data(self, name, slots, reg, reaper, guard, bake, boot):
+        one_job, repos, events = self.one_job, self.repos, self.events
+        # Secrets travel as user data, never in the image. The Hetzner token reaches only
+        # this pool's project, which is what makes a token on the server acceptable.
+        return "\n".join([
                 "#!/bin/bash",
                 "set -euo pipefail",
-                f"export ORG='{self.org}' POOL='{self.pool}' NAME='{name}' SLOTS='{self.slots}'",
+                f"export ORG='{self.org}' POOL='{self.pool}' NAME='{name}' SLOTS='{slots}'",
                 f"export REG_TOKEN='{reg}' HCLOUD_TOKEN='{self.hc_token}'",
                 f"export REMOVE_FROM='{REMOVE_FROM}' REMOVE_UNTIL='{REMOVE_UNTIL}'",
                 "cat > /usr/local/bin/pool-reaper <<'REAPER'",
@@ -403,44 +492,6 @@ class Pool:
                 bake,
                 boot,
             ])
-            for server_type, location in self.candidates:
-                body = {
-                    "name": name,
-                    "server_type": server_type,
-                    "location": location,
-                    "image": image or "ubuntu-24.04",
-                    "user_data": user_data,
-                    "ssh_keys": [self.ssh_key],
-                    "labels": {"pool": self.pool},
-                    "start_after_create": True,
-                    # IPv4 only: each primary IP counts against the account's limit, and nothing a
-                    # job reaches needs IPv6.
-                    "public_net": {"enable_ipv4": True, "enable_ipv6": False},
-                }
-                print(f"create {name} ({server_type}, {location}, image {image or 'ubuntu-24.04 + bake'})")
-                if self.dry:
-                    break
-                try:
-                    self.hc("/servers", "POST", body)
-                    break
-                except urllib.error.HTTPError as e:
-                    reason = refusal_code(e)
-                    refusals.append((f"{server_type}:{location}", reason))
-                    print(f"  {server_type} in {location}: {reason}; trying the next candidate")
-            else:
-                # Every candidate refused, most often because the project has reached its core
-                # or server limit, which no other type or location escapes. Creating stops for
-                # this run and the run goes on to its cleanup; the next run tries again.
-                named = "; ".join(f"{c} {r}" for c, r in refusals)
-                if all(r in CAPACITY_REFUSALS for _, r in refusals):
-                    print(f"warning: no candidate could place {name} ({named}); "
-                          f"creating stops for this run, {n - i - 1} more server(s) not attempted")
-                    return None
-                # A refusal that is not about capacity (bad input, a missing permission) will not
-                # pass by itself: the run fails, after its cleanup, like a missing SSH key.
-                print(f"no candidate could place {name} ({named})")
-                return f"no candidate could place {name}: {named}"
-        return None
 
     def runner_busy(self, runner):
         """The runner's busy state read fresh from GitHub: True, False, or None when it cannot
@@ -491,14 +542,15 @@ class Pool:
             return [r for r in runners if r["name"].startswith(server["name"] + "-")]
 
         idle = sum(1 for r in runners if r["status"] == "online" and not r["busy"])
-        booting = sum(self.slots for s in servers
+        booting = sum(self.slots_of(s) for s in servers
                       if not any(r["status"] == "online" for r in own(s))
                       and (now - created(s)).total_seconds() / 60 <= BOOT_GRACE_MIN)
         print(f"pool {self.pool}: {len(servers)} server(s), {len(runners)} runner(s), "
               f"{idle} idle slot(s), {booting} booting slot(s), {queued} queued job(s)")
 
         # reuse is GitHub's routing; create for what it cannot cover
-        create_error = self.create(servers_to_create(queued, idle, booting, len(servers), self.max_servers, self.slots), now)
+        used = sum(self.slots_of(s) for s in servers)
+        create_error = self.create(unmet_slots(queued, idle, booting), now, room=self.max_servers - used)
 
         # a job that has waited this long was seen by earlier runs and still has no runner
         for j in stale_jobs(waiting, now):
