@@ -41,7 +41,7 @@
 # pool-keep-until label lies in the future; at the cap it does not keep the server and applies the
 # plain rule. Two reapers can decide in the same minute, so after labelling it counts again, and if
 # the pool is then over the cap it removes its own label and applies the plain rule. Both may back
-# off, which leaves fewer warm servers than the cap, never more. If the count cannot be read, the
+# off, which leaves fewer warm servers than the cap, never more (except briefly, see docs/design.md). If the count cannot be read, the
 # server is not kept. A kept server that takes a job is no longer idle, so its reaper removes its
 # label at once (it remembers the label in POOL_KEPT_FILE), and the warm place goes to another server.
 set -u
