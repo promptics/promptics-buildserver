@@ -57,9 +57,9 @@ jobs:
             org: promptics
             repos: ""        # every repo of the org: a run always scans them all, since concurrency keeps only the newest pending run
             candidates: "cx43:fsn1 cx43:nbg1 cx43:hel1 cpx42:fsn1 cpx42:nbg1 cpx42:hel1"
-            max_servers: 10  # One job per server (two builds on one 8-vCPU server ran past their time limit). A create the project's limits refuse stops creating for that run with a warning
+            max_servers: 8   # One job per server (two builds on one 8-vCPU server ran past their time limit). A create the project's limits refuse stops creating for that run with a warning
             slots: 1
-            idle_keep_min: 240   # keep an idle server for further billed hours while a job ended within 4 hours (scaler/reaper.sh)
+            idle_keep_min: 60    # keep an idle server for another billed hour while a job ended within the last hour (scaler/reaper.sh)
             token: HCLOUD_TOKEN_CI
           - pool: promptics-privileged
             org: promptics
