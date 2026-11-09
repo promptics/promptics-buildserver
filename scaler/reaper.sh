@@ -93,7 +93,8 @@ unmark_kept() {
 }
 
 # Prints how many servers of this pool other than this one carry a pool-keep-until label that
-# lies in the future; fails when the list cannot be read.
+# lies in the future; fails when the list cannot be read. One page of 50 servers is read, which
+# covers any pool whose MAX_SERVERS is at most 50; a larger pool would need paging here.
 others_kept() {
   local id body
   id=$(curl -fsS "$METADATA/instance-id") || return 1
@@ -192,7 +193,10 @@ if [ "${ONE_JOB:-0}" != 1 ] && [ "$IDLE_KEEP_MIN" -gt 0 ]; then
         # Another reaper may have kept its server in the same minute: recount, and back off if over.
         if ! others=$(others_kept) || [ -z "$others" ] || [ "$others" -ge "$IDLE_KEEP_MAX" ]; then
           log "minute $minute: over the cap of $IDLE_KEEP_MAX warm servers after labelling (others: ${others:-unknown}): backing off"
-          unmark_kept || exit 0
+          # If the label cannot be removed, the server still goes by the plain rule: a removed
+          # server holds no warm place, and one a job reaches first keeps its label only until
+          # the busy release near the top removes it (POOL_KEPT_FILE stays, so it retries every minute).
+          unmark_kept || log "minute $minute: could not remove the keep label: applying the plain rule anyway"
           keep=0
         fi
       fi

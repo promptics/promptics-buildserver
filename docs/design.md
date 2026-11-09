@@ -24,7 +24,12 @@ powered off; only deletion stops the meter. Every pool follows one rule:
   same minute, so each counts again after labelling and backs off if the pool is over the cap: the
   pool may briefly have fewer warm servers than the cap, never more. A count it cannot read keeps
   nothing. A warm server that takes a job removes its label at once, so a busy server never holds
-  a warm place.
+  a warm place. If a backing-off server cannot remove its label, it is still removed by the plain
+  rule; only if a job reaches it first does it keep the label, until that job makes it release it,
+  or, should its delete fail as well, until its keep time ends (about an hour).
+  The recount relies on Hetzner's server list showing a label right after it was set; that holds in
+  practice but is not documented, and if it ever lagged the pool could briefly hold one warm server
+  over the cap. The count reads one page of 50 servers, enough for any pool of up to 50.
 
 **The server removes itself.** Scheduled workflows start minutes late and would miss that window,
 so `scaler/reaper.sh` runs every minute on the server. That puts a Hetzner token on the server,
