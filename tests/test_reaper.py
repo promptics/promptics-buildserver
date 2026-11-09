@@ -45,6 +45,7 @@ STUBS = {
             n=$(( $(cat "$STATE/lists" 2>/dev/null || echo 0) + 1 )); echo $n > "$STATE/lists"
             if [ -e "$STATE/servers-$n" ]; then cat "$STATE/servers-$n"; else cat "$STATE/servers"; fi ;;
           *DELETE*) [ -e "$STATE/delete-fails" ] && exit 22 ;;
+          *'{"labels":{"pool":"pool-x"}}'*) [ -e "$STATE/unmark-fails" ] && exit 22 ;;
         esac
         exit 0
     """,
@@ -281,6 +282,14 @@ class WarmCapReaper(Reaper):
         self.assertIn('{"labels":{"pool":"pool-x"}}', self.puts()[1])   # its own label removed
         self.assertIn("backing off", self.read("log"))
         self.assertFalse(os.path.exists(os.path.join(self.dir, "kept")))
+
+    def test_a_backing_off_server_whose_label_cannot_be_removed_still_goes(self):
+        self.servers(self.now() + 600, name="servers-1")
+        self.servers(self.now() + 600, self.now() + 700, name="servers-2")
+        self.write("unmark-fails", "")
+        self.run_kept()
+        self.assertTrue(self.deleted())
+        self.assertIn("could not remove the keep label: applying the plain rule anyway", self.read("log"))
 
     def test_an_unreadable_count_keeps_nothing(self):
         self.write("list-fails", "")
