@@ -85,7 +85,7 @@ class Candidates(unittest.TestCase):
         self.assertEqual(two_slot.get("image_pool"), "promptics-pool")
 
     def test_a_malformed_candidate_stops_the_controller(self):
-        for bad in ("cx43", "cx43:fsn1:2:x", "cx43::2", "cx53:fsn1:0"):
+        for bad in ("cx43", "cx43:fsn1:2:x", "cx43::2", "cx53:fsn1:0", "cx43:fsn1:x"):
             with self.assertRaises(SystemExit):
                 pool.parse_candidates(bad, 1)
 

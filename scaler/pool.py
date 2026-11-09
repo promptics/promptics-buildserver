@@ -108,6 +108,8 @@ def parse_candidates(text: str, default_slots: int):
         parts = c.split(":")
         if len(parts) not in (2, 3) or not all(parts):
             sys.exit(f"CANDIDATES: '{c}' is not type:location or type:location:slots")
+        if len(parts) == 3 and not parts[2].lstrip("-").isdigit():
+            sys.exit(f"CANDIDATES: '{c}' names a slot count that is not a number")
         slots = int(parts[2]) if len(parts) == 3 else default_slots
         if slots < 1:
             sys.exit(f"CANDIDATES: '{c}' names fewer than one slot")
