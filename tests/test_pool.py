@@ -76,12 +76,13 @@ class Candidates(unittest.TestCase):
     def test_a_pair_without_slots_gets_the_pool_default(self):
         self.assertEqual(pool.parse_candidates("cx43:fsn1 cx53:nbg1:2", 1), [("cx43", "fsn1", 1), ("cx53", "nbg1", 2)])
 
-    def test_only_the_opt_in_pool_runs_two_jobs_on_a_server(self):
+    def test_every_pool_runs_one_job_per_server(self):
+        """Two build jobs on one shared-vCPU server ran slower, flakier and dearer per job (docs/design.md)."""
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".github", "workflows", "pool-scale.yml")) as f:
             matrix = yaml_matrix(f.read())
         for entry in matrix:
             two = [c for c in pool.parse_candidates(entry["candidates"], int(entry["slots"])) if c[2] > 1]
-            self.assertEqual(bool(two), entry["pool"] == "promptics-pool-2slot", entry["pool"])
+            self.assertEqual([], two, entry["pool"])
         two_slot = next(e for e in matrix if e["pool"] == "promptics-pool-2slot")
         self.assertEqual(two_slot.get("image_pool"), "promptics-pool")
 
@@ -102,21 +103,6 @@ class Candidates(unittest.TestCase):
         for bad in ("cx43", "cx43:fsn1:2:x", "cx43::2", "cx53:fsn1:0", "cx43:fsn1:x"):
             with self.assertRaises(SystemExit):
                 pool.parse_candidates(bad, 1)
-
-    def test_the_opt_in_pools_order_and_slots(self):
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".github", "workflows", "pool-scale.yml")) as f:
-            text = f.read()
-        lines = [l for l in text.splitlines() if "candidates:" in l and "cx53" in l]
-        self.assertEqual(1, len(lines), "only the opt-in pool has 2-slot candidates")
-        line = lines[0]
-        parsed = pool.parse_candidates(line.split('"')[1], 1)
-        order = []
-        for t, _, slots in parsed:
-            if (t, slots) not in order:
-                order.append((t, slots))
-        self.assertEqual(order, [("cx43", 1), ("cx53", 2), ("cpx62", 2), ("cpx42", 1)])
-        self.assertEqual({loc for _, loc, _ in parsed}, {"fsn1", "nbg1", "hel1"})
-        self.assertEqual(len(parsed), 12, "each type in all three locations")
 
 
 

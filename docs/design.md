@@ -19,6 +19,12 @@ powered off; only deletion stops the meter. Every pool follows one rule:
   with a label of its own, which a workflow asks for once its jobs clean up nothing
   server-wide (all containers, fixed ports, fixed /tmp paths): no job of another repository
   can land beside it by accident.
+  **Measured, and not used today:** two build jobs on one 16-vCPU server with shared vCPUs each
+  ran 1.4–1.8 times as long as alone (the neighbour takes CPU, not memory), and timing-sensitive
+  tests failed about 25 times as often. Per job that costs about 1.6 times a one-job server's
+  hour share. A type with dedicated vCPUs costs about twice a shared one per job slot. So every
+  pool runs one job per server. The slot count stays for a type that gives each job a full share
+  at a lower price.
 - **Remove only when idle, and only in minutes 50–57 of the server's own billing hour.** An idle
   server earlier in its hour is already paid for and takes the next job for free.
 - **Optionally, keep an idle server warm** (`IDLE_KEEP_MIN`, off by default). In its removal window
